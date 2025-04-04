@@ -170,7 +170,7 @@ async fn main() {
         .merge(no_prefix_router)
         .with_state(shared_state);
 
-    // 启动 HTTP 服务监听本地 3000 端口
+    // 启动 HTTP 服务监听本地 4321 端口
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4321").await.unwrap();
     println!("服务器正在监听: 4321 端口, 请访问 http://127.0.0.1:4321/v1/chat/completions");
     axum::serve(listener, app.into_make_service())
@@ -178,7 +178,6 @@ async fn main() {
         .unwrap();
 }
 
-// 为 chat_completion 函数添加 #[axum::debug_handler] 宏
 #[axum::debug_handler]
 async fn chat_completion(
     State(state): State<Arc<AppState>>,
@@ -225,7 +224,7 @@ async fn chat_completion(
     let db_arc = state.db.clone(); // 克隆 Arc
     let key = cache_key.clone();
     let cached_result = tokio::task::spawn_blocking(move || {
-        let conn = db_arc.blocking_lock(); // 使用 blocking_lock 替代 lock().await
+        let conn = db_arc.blocking_lock();
         if cache_override_mode {
             conn.prepare("SELECT response FROM cache WHERE key = ?1 AND version = ?2")
                 .and_then(|mut stmt| {

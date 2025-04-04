@@ -14,11 +14,13 @@
 
 ### 环境变量配置
 
-在运行项目之前，请确保设置了以下环境变量：
+解释
 
 - `DATABASE_URL`: SQLite 数据库的路径，默认为 `cache.db`。
 - `API_URL`: 上游 API 的地址，默认为 `http://127.0.0.1:1234`。
 - `USE_CURL`: 是否使用 `curl` 作为备选请求方式，默认为 `false`。
+- `CACHE_VERSION`: 用于搭配 CACHE_OVERRIDE_MODE 决定是否覆盖旧缓存
+- `CACHE_OVERRIDE_MODE`: 是否开启缓存覆盖模式(如果你需要逐步更新已有的缓存的话)
 
 ### 启动服务
 
@@ -98,11 +100,13 @@ This is an LLM (Large Language Model) API service built with Rust and the Axum f
 
 ### Environment Variables Configuration
 
-Before running the project, ensure the following environment variables are set:
+explain
 
 - `DATABASE_URL`: Path to the SQLite database, defaults to `cache.db`.
 - `API_URL`: Address of the upstream API, defaults to `http://127.0.0.1:1234`.
 - `USE_CURL`: Whether to use `curl` as an alternative request method, defaults to `false`.
+- `CACHE_VERSION`: used to determine whether to override the old cache
+- `CACHE_OVERRIDE_MODE`: Whether to enable cache override mode (if you need to gradually update the existing cache)
 
 ### Starting the Service
 
