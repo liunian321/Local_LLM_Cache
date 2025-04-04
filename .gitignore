@@ -1,0 +1,10 @@
+/target
+.cursorignore
+*.db
+*-shm
+*-wal
+*.sql
+.cursor
+.vscode
+.idea
+*.env
