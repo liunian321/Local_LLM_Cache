@@ -1,6 +1,6 @@
-# LLM API 服务
+# LLM Local Cache
 
-这是一个基于 Rust 和 Axum 框架构建的 LLM (Large Language Model) API 服务，用于处理聊天请求、模型获取和嵌入生成。项目通过 SQLite 数据库进行缓存管理，并支持通过 HTTP 请求与上游 API 进行交互。
+这是一个基于 Rust 和 Axum 框架构建的 LLM (Large Language Model) API 缓存服务，用于处理聊天请求、模型获取和嵌入生成。项目通过 SQLite 数据库进行缓存管理，通过 HTTP 请求与上游 API 进行交互。
 
 ## 功能描述
 
@@ -84,9 +84,9 @@
 
 ---
 
-# LLM API Service
+# LLM API Cache Service
 
-This is an LLM (Large Language Model) API service built with Rust and the Axum framework, designed to handle chat requests, model retrieval, and embedding generation. The project uses SQLite for cache management and supports interaction with an upstream API via HTTP requests.
+This is an LLM (Large Language Model) API cache service built with Rust and the Axum framework, designed to handle chat requests, model retrieval, and embedding generation. The project uses SQLite for cache management and supports interaction with an upstream API via HTTP requests.
 
 ## Features
 

@@ -83,58 +83,88 @@ pub async fn chat_completion(
     };
 
     if let Some(compressed_response) = cached {
-        // 缓存命中，使用 brotli 解压缩数据
-        let mut decompressed = Vec::new();
-        let mut decompressor =
-            brotli::Decompressor::new(compressed_response.as_slice(), compressed_response.len());
-        std::io::copy(&mut decompressor, &mut decompressed)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        // 将解压缩后的数据反序列化为字符串
-        let message_content = String::from_utf8(decompressed)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        // 异步更新缓存命中次数
+        // 缓存命中，使用 hit_runtime 异步处理
+        let hit_runtime = state.hit_runtime.clone();
         let db_arc = state.db.clone();
         let key = cache_key.clone();
-        tokio::spawn(async move {
+        let payload_model = payload.model.clone();
+        
+        let join_handle = hit_runtime.spawn(async move {
+            let hit_start_time = Instant::now();
+            
+            // 使用 brotli 解压缩数据
+            let mut decompressed = Vec::new();
+            let mut decompressor =
+                brotli::Decompressor::new(compressed_response.as_slice(), compressed_response.len());
+            match std::io::copy(&mut decompressor, &mut decompressed) {
+                Ok(_) => {},
+                Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+            };
+
+            // 将解压缩后的数据反序列化为字符串
+            let message_content = match String::from_utf8(decompressed) {
+                Ok(content) => content,
+                Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+            };
+
+            // 异步更新缓存命中次数
             if let Err(e) = sqlx::query("UPDATE cache SET hit_count = hit_count + 1 WHERE key = ?")
-                .bind(key)
+                .bind(key.clone())
                 .execute(&*db_arc)
                 .await {
                 eprintln!("更新缓存命中次数失败: {}", e);
             }
+
+            // 组装响应结果
+            let response = ChatResponseJson {
+                id: format!("cache-hit-{}", Uuid::new_v4()),
+                object: "chat.completion".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                model: payload_model,
+                choices: vec![ChatChoice {
+                    index: 0,
+                    logprobs: None,
+                    finish_reason: "stop_from_cache".to_string(),
+                    message: ChatMessageJson {
+                        role: "assistant".to_string(),
+                        content: message_content,
+                    },
+                }],
+                usage: Usage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                },
+                stats: serde_json::Value::Null,
+                system_fingerprint: "cached".to_string(),
+            };
+
+            // 打印缓存命中耗时
+            let duration = hit_start_time.elapsed();
+            println!("缓存命中处理耗时: {:?}", duration);
+
+            Ok(response)
         });
 
-        // 组装响应结果
-        let response = ChatResponseJson {
-            id: format!("cache-hit-{}", Uuid::new_v4()),
-            object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
-            model: payload.model.clone(),
-            choices: vec![ChatChoice {
-                index: 0,
-                logprobs: None,
-                finish_reason: "stop_from_cache".to_string(),
-                message: ChatMessageJson {
-                    role: "assistant".to_string(),
-                    content: message_content,
-                },
-            }],
-            usage: Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
+        // 等待 hit_runtime 上的任务完成并处理结果
+        match join_handle.await {
+            Ok(Ok(response_json)) => {
+                let total_duration = start_time.elapsed();
+                println!("缓存命中总耗时: {:?}", total_duration);
+                return Ok(Json(response_json));
             },
-            stats: serde_json::Value::Null,
-            system_fingerprint: "cached".to_string(),
-        };
-
-        // 打印缓存命中耗时
-        let duration = start_time.elapsed();
-        println!("缓存命中耗时: {:?}", duration);
-
-        return Ok(Json(response));
+            Ok(Err(err)) => return Err(err),
+            Err(e) => {
+                eprintln!(
+                    "处理缓存命中任务失败 (JoinError): {}, Key: {}",
+                    e, cache_key
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("处理缓存命中请求失败 (JoinError), Key={}", cache_key),
+                ));
+            }
+        }
     } else {
         // 缓存未命中，调用上游 API
         let api_url = state.api_url.clone(); // 克隆 api_url
