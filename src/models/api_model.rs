@@ -1,10 +1,9 @@
 use sqlx::SqlitePool;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::runtime::Runtime;
 
 // 定义对外暴露的请求 JSON 数据结构
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize,Clone)]
 pub struct ChatRequestJson {
     pub model: String,
     pub messages: Vec<ChatMessageJson>,
@@ -45,19 +44,17 @@ pub struct Usage {
 }
 
 // 为 ChatMessageJson 结构体添加 Serialize 派生宏
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessageJson {
     pub role: String,
     pub content: String,
 }
 
-// 修改 AppState 结构体，将 db 包装在 Arc 中
+// 修改 AppState 结构体，移除运行时
 pub struct AppState {
-    pub db: Arc<SqlitePool>, // 使用 Arc 包装 SqlitePool
-    pub client: reqwest::Client,// 用于处理 HTTP 请求
+    pub db: Arc<SqlitePool>,
+    pub client: reqwest::Client,
     pub api_url: String,
-    pub miss_runtime: Arc<Runtime>, // 用于处理缓存未命中的运行时
-    pub hit_runtime: Arc<Runtime>,  // 用于处理命中缓存的运行时
 }
 
 // 为 temperature 提供默认值

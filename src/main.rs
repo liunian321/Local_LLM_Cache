@@ -8,6 +8,10 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Executor;
 use std::{env, sync::Arc};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use serde_json;
+use axum::extract::State;
+use axum::Json;
 
 // 初始化数据库
 async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -96,7 +100,7 @@ async fn main() {
         cache_miss_pool_size, cache_hit_pool_size
     );
 
-    // 构造共享状态, 加入 miss_runtime 和 hit_runtime
+    // 将 miss_runtime 和 hit_runtime 从 AppState 中移除
     let shared_state: Arc<AppState> = Arc::new(AppState {
         db: Arc::new(pool), // 使用 Arc 包装 SqlitePool
         client: reqwest::Client::builder()
@@ -110,25 +114,54 @@ async fn main() {
             .build()
             .expect("无法创建HTTP客户端"),
         api_url,
-        miss_runtime,
-        hit_runtime,
     });
+
+    // 创建专用于处理请求的通道
+    let (tx_miss, mut rx_miss) = mpsc::channel(128);
+    let (tx_hit, mut rx_hit) = mpsc::channel(1024);
+
+    // 启动处理缓存未命中的后台任务
+    let miss_runtime_clone = miss_runtime.clone();
+    tokio::spawn(async move {
+        while let Some(task) = rx_miss.recv().await {
+            miss_runtime_clone.spawn(task);
+        }
+    });
+
+    // 启动处理缓存命中的后台任务
+    let hit_runtime_clone = hit_runtime.clone();
+    tokio::spawn(async move {
+        while let Some(task) = rx_hit.recv().await {
+            hit_runtime_clone.spawn(task);
+        }
+    });
+
+    // 将通道发送端添加到应用状态
+    let app_state = Arc::new((shared_state, tx_miss, tx_hit));
 
     // 构建 Axum 路由
     let v1_router = Router::new()
         .route("/v1/chat/completions", axum::routing::post(chat_completion))
-        .route("/v1/models", axum::routing::get(get_models))
-        .route("/v1/embeddings", axum::routing::post(get_embeddings));
+        .route("/v1/models", axum::routing::get(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>| async move {
+            get_models(State(state.0.0.clone())).await
+        }))
+        .route("/v1/embeddings", axum::routing::post(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>, payload: Json<serde_json::Value>| async move {
+            get_embeddings(State(state.0.0.clone()), payload).await
+        }));
 
     let no_prefix_router = Router::new()
         .route("/chat/completions", axum::routing::post(chat_completion))
-        .route("/models", axum::routing::get(get_models))
-        .route("/embeddings", axum::routing::post(get_embeddings));
+        .route("/models", axum::routing::get(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>| async move {
+            get_models(State(state.0.0.clone())).await
+        }))
+        .route("/embeddings", axum::routing::post(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>, payload: Json<serde_json::Value>| async move {
+            get_embeddings(State(state.0.0.clone()), payload).await
+        }));
 
     let app = Router::new()
         .merge(v1_router)
         .merge(no_prefix_router)
-        .with_state(shared_state);
+        .with_state(app_state);
 
     // 监听本地 4321 端口
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4321").await.unwrap();
