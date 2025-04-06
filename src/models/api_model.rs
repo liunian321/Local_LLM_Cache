@@ -54,7 +54,7 @@ pub struct ChatMessageJson {
 pub struct AppState {
     pub db: Arc<SqlitePool>,
     pub client: reqwest::Client,
-    pub api_url: String,
+    pub api_url: String
 }
 
 // 为 temperature 提供默认值

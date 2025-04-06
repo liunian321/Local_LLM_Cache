@@ -1,17 +1,22 @@
 // 载入依赖与模块
 use axum::Router;
+use axum::{
+    Json,
+    extract::State,
+    routing::{get, post},
+};
 use dotenv::dotenv;
-use llm_api::handlers::api_handler::{chat_completion, get_embeddings, get_models};
+use llm_api::handlers::api_handler::{get_embeddings, get_models};
+use llm_api::handlers::chat_completion_handler::chat_completion;
 use llm_api::models::api_model::AppState;
+use num_cpus;
 use reqwest;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use serde_json;
 use sqlx::Executor;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::{env, sync::Arc};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
-use serde_json;
-use axum::extract::State;
-use axum::Json;
 
 // 初始化数据库
 async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -33,20 +38,21 @@ async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
 async fn main() {
     dotenv().ok();
     // 从环境变量加载数据库与 API 地址
-    let database_url: String = env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cache.db".to_string());
+    let database_url: String =
+        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cache.db".to_string());
     let api_url: String =
         env::var("API_URL").unwrap_or_else(|_| "http://127.0.0.1:1234".to_string());
     let use_curl: bool = env::var("USE_CURL")
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
-    // 读取缓存未命中线程池大小，默认为 4
+    // 读取缓存未命中线程池大小，默认为 CPU 核心数
     let cache_miss_pool_size: usize = env::var("CACHE_MISS_POOL_SIZE")
-        .unwrap_or_else(|_| "4".to_string())
+        .unwrap_or_else(|_| num_cpus::get().to_string())
         .parse()
         .expect("无法解析 CACHE_MISS_POOL_SIZE");
     let cache_hit_pool_size: usize = env::var("CACHE_HIT_POOL_SIZE")
-        .unwrap_or_else(|_| "64".to_string())
+        .unwrap_or_else(|_| (num_cpus::get() * 2).to_string())
         .parse()
         .expect("无法解析 CACHE_HIT_POOL_SIZE");
 
@@ -57,7 +63,7 @@ async fn main() {
 
     // 打开 SQLite 连接池
     let pool = SqlitePoolOptions::new()
-        .max_connections(10) // 设置最大连接数
+        .max_connections(100) // 设置最大连接数
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(&database_url)
@@ -69,11 +75,20 @@ async fn main() {
     // 初始化数据库
     init_db(&pool).await.expect("数据库初始化失败");
 
-    pool.execute("PRAGMA journal_mode=WAL;").await.expect("无法启用 WAL 模式");
+    pool.execute("PRAGMA journal_mode=WAL;")
+        .await
+        .expect("无法启用 WAL 模式");
 
-    pool.execute("PRAGMA wal_autocheckpoint=4;").await.expect("无法设置自动检查点");
+    pool.execute("PRAGMA wal_autocheckpoint=4;")
+        .await
+        .expect("无法设置自动检查点");
 
-    pool.execute("PRAGMA wal_checkpoint(FULL);").await.expect("无法执行检查点");
+    pool.execute("PRAGMA wal_checkpoint(FULL);")
+        .await
+        .expect("无法执行检查点");
+    pool.execute("PRAGMA read_uncommitted=true;")
+        .await
+        .expect("无法设置读未提交");
 
     // 专门用于处理缓存未命中的运行时
     let miss_runtime: Arc<Runtime> = Arc::new(
@@ -102,12 +117,12 @@ async fn main() {
 
     // 将 miss_runtime 和 hit_runtime 从 AppState 中移除
     let shared_state: Arc<AppState> = Arc::new(AppState {
-        db: Arc::new(pool), // 使用 Arc 包装 SqlitePool
+        db: Arc::new(pool),
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .connect_timeout(std::time::Duration::from_secs(30))
             .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .tcp_keepalive(std::time::Duration::from_secs(600))
             .danger_accept_invalid_certs(true) // 接受自签名证书
             .http1_title_case_headers() // 使用标题大小写形式的头
             .no_proxy() // 禁用代理
@@ -141,26 +156,69 @@ async fn main() {
 
     // 构建 Axum 路由
     let v1_router = Router::new()
-        .route("/v1/chat/completions", axum::routing::post(chat_completion))
-        .route("/v1/models", axum::routing::get(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>| async move {
-            get_models(State(state.0.0.clone())).await
-        }))
-        .route("/v1/embeddings", axum::routing::post(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>, payload: Json<serde_json::Value>| async move {
-            get_embeddings(State(state.0.0.clone()), payload).await
-        }));
+        .route("/v1/chat/completions", post(chat_completion))
+        .route(
+            "/v1/models",
+            get(
+                |state: State<
+                    Arc<(
+                        Arc<AppState>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                    )>,
+                >| async move { get_models(State(state.0.0.clone())).await },
+            ),
+        )
+        .route(
+            "/v1/embeddings",
+            post(
+                |state: State<
+                    Arc<(
+                        Arc<AppState>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                    )>,
+                >,
+                 payload: Json<serde_json::Value>| async move {
+                    get_embeddings(State(state.0.0.clone()), payload).await
+                },
+            ),
+        );
 
     let no_prefix_router = Router::new()
-        .route("/chat/completions", axum::routing::post(chat_completion))
-        .route("/models", axum::routing::get(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>| async move {
-            get_models(State(state.0.0.clone())).await
-        }))
-        .route("/embeddings", axum::routing::post(|state: State<Arc<(Arc<AppState>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>, mpsc::Sender<futures::future::BoxFuture<'static, ()>>)>>, payload: Json<serde_json::Value>| async move {
-            get_embeddings(State(state.0.0.clone()), payload).await
-        }));
+        .route("/chat/completions", post(chat_completion))
+        .route(
+            "/models",
+            get(
+                |state: State<
+                    Arc<(
+                        Arc<AppState>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                    )>,
+                >| async move { get_models(State(state.0.0.clone())).await },
+            ),
+        )
+        .route(
+            "/embeddings",
+            post(
+                |state: State<
+                    Arc<(
+                        Arc<AppState>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                        mpsc::Sender<futures::future::BoxFuture<'static, ()>>,
+                    )>,
+                >,
+                 payload: Json<serde_json::Value>| async move {
+                    get_embeddings(State(state.0.0.clone()), payload).await
+                },
+            ),
+        );
 
     let app = Router::new()
         .merge(v1_router)
         .merge(no_prefix_router)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(128)) // 允许128个并发请求
         .with_state(app_state);
 
     // 监听本地 4321 端口

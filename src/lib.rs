@@ -8,4 +8,5 @@ pub mod models {
 
 pub mod handlers {
     pub mod api_handler;
+    pub mod chat_completion_handler;
 }
