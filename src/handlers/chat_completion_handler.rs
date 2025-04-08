@@ -127,6 +127,7 @@ pub async fn chat_completion(
                                     system_fingerprint: "cached".to_string(),
                                 };
 
+                                println!("缓存命中");
                                 Ok(Json(response))
                             }
                             Err(e) => Err((
@@ -151,7 +152,13 @@ pub async fn chat_completion(
         Ok(None) => {
             // 缓存未命中逻辑
             // 克隆需要传递给异步任务的变量
-            let target_url = format!("{}/v1/chat/completions", state.api_url);
+            let api_url_clone = state.api_url.clone();
+            // 确保API URL格式正确
+            let target_url = if api_url_clone.ends_with('/') {
+                format!("{}v1/chat/completions", api_url_clone)
+            } else {
+                format!("{}/v1/chat/completions", api_url_clone)
+            };
             let client_clone = state.client.clone();
             let payload_clone = payload.clone();
             let cache_key_clone = cache_key.clone();
@@ -171,23 +178,17 @@ pub async fn chat_completion(
                     }
                 };
 
+                
                 // 构建 reqwest 请求
-                let mut request_builder = client_clone
+                let request_builder = client_clone
                     .post(&target_url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .header("User-Agent", "llm_api_rust_client/1.0");
 
-                // 如果 API URL 包含主机名，则设置 Host 头
-                if let Ok(url_parsed) = reqwest::Url::parse(&target_url) {
-                    if let Some(host) = url_parsed.host_str() {
-                        request_builder = request_builder.header("Host", host);
-                    }
-                }
-
                 // 发送请求
                 let request_result = request_builder.body(payload_json.clone()).send().await;
-
+                
                 // 处理请求结果
                 let response_result = match request_result {
                     Ok(res) => {

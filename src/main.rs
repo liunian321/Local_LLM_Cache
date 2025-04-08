@@ -106,11 +106,9 @@ async fn main() {
         db: Arc::new(pool),
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1800))
+            // .http2_prior_knowledge() // 启用 HTTP/2
             .pool_idle_timeout(std::time::Duration::from_secs(600))
-            .http2_prior_knowledge() // 启用 HTTP/2
             .danger_accept_invalid_certs(true) // 接受自签名证书
-            .http1_title_case_headers() // 使用标题大小写形式的头
-            .no_proxy() // 禁用代理
             .build()
             .expect("无法创建HTTP客户端"),
         api_url,

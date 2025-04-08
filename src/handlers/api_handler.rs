@@ -20,6 +20,13 @@ pub async fn send_request_with_curl(
         .arg("Content-Type: application/json")
         .arg("-H")
         .arg("Accept: application/json")
+        .arg("-H")
+        .arg("User-Agent: llm_api_rust_client/1.0")
+        .arg("--connect-timeout")
+        .arg("30") // 连接超时30秒
+        .arg("--max-time")
+        .arg("1800") // 总超时30分钟
+        .arg("-v") // 显示详细信息
         .arg("-d")
         .arg(payload)
         .arg(url)
@@ -67,9 +74,18 @@ pub async fn send_request_with_curl(
 pub async fn get_models(
     State(state): State<Arc<AppState>>,
 ) -> Result<String, (StatusCode, String)> {
+    // 确保API URL格式正确
+    let target_url = if state.api_url.ends_with('/') {
+        format!("{}v1/models", state.api_url)
+    } else {
+        format!("{}/v1/models", state.api_url)
+    };
+    
+    println!("获取模型列表，请求: {}", target_url);
+    
     let res = state
         .client
-        .get(format!("{}/v1/models", state.api_url))
+        .get(&target_url)
         .send()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -87,9 +103,18 @@ pub async fn get_embeddings(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<String, (StatusCode, String)> {
+    // 确保API URL格式正确
+    let target_url = if state.api_url.ends_with('/') {
+        format!("{}v1/embeddings", state.api_url)
+    } else {
+        format!("{}/v1/embeddings", state.api_url)
+    };
+    
+    println!("发送嵌入请求到: {}", target_url);
+    
     let res = state
         .client
-        .post(format!("{}/v1/embeddings", state.api_url))
+        .post(&target_url)
         .json(&payload)
         .send()
         .await
