@@ -4,3 +4,11 @@
 /.cursor/
 .DS_Store
 /.vscode
+*.db
+*-shm
+*-wal
+*.sql
+.cursor
+.vscode
+.idea
+*.env
