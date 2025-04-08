@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package api;
+
+// 定义单条聊天消息
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+// 定义聊天请求（用于描述上游的请求结构）
+message ChatRequest {
+  string model = 1;
+  repeated ChatMessage messages = 2;
+  float temperature = 3;
+  int32 max_tokens = 4;
+  bool stream = 5;
+}
+
+// 定义聊天响应，包含完整的 AI 返回结果
+message ChatResponse {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string model = 4;
+  repeated ChatChoice choices = 5;
+  Usage usage = 6;
+  string system_fingerprint = 7;
+}
+
+message ChatChoice {
+  int32 index = 1;
+  string finish_reason = 2;
+  ChatMessage message = 3;
+}
+
+message Usage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}

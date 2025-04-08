@@ -1,0 +1,6 @@
+/target
+.cursorignore
+*.env
+/.cursor/
+.DS_Store
+/.vscode
