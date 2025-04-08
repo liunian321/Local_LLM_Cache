@@ -55,6 +55,7 @@ pub struct AppState {
     pub db: Arc<SqlitePool>,
     pub client: reqwest::Client,
     pub api_url: String,
+    pub max_concurrent_requests: usize,
 }
 
 // 为 temperature 提供默认值

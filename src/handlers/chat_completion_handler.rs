@@ -13,23 +13,170 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::io::Write;
 use std::sync::Arc;
+use tokio::sync::{oneshot, Semaphore};
 use uuid::Uuid;
 
 pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 
+// 缓存查询的异步函数
+async fn query_cache(
+    db: Arc<sqlx::SqlitePool>,
+    cache_key: String,
+    cache_version: i32,
+    cache_override_mode: bool,
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
+    println!("并行查询缓存: {}", &cache_key[..8]); // 只显示key的前8位
+
+    let result = if cache_override_mode {
+        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ? AND version = ?")
+            .bind(cache_key.clone())
+            .bind(cache_version)
+            .fetch_optional(&*db)
+            .await?
+    } else {
+        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ?")
+            .bind(cache_key.clone())
+            .fetch_optional(&*db)
+            .await?
+    };
+
+    Ok(result.map(|(data,)| data))
+}
+
+// 处理解压缩缓存内容
+async fn process_cached_response(
+    compressed_data: Vec<u8>,
+    payload: ChatRequestJson,
+) -> Result<Json<ChatResponseJson>, (StatusCode, String)> {
+    let mut decompressed = Vec::new();
+    let mut decompressor = brotli::Decompressor::new(compressed_data.as_slice(), compressed_data.len());
+
+    match std::io::copy(&mut decompressor, &mut decompressed) {
+        Ok(_) => match String::from_utf8(decompressed) {
+            Ok(message_content) => {
+                // 构建响应
+                let response = ChatResponseJson {
+                    id: Uuid::new_v4().to_string(),
+                    object: "chat.completion".to_string(),
+                    created: chrono::Utc::now().timestamp(),
+                    model: payload.model.clone(),
+                    choices: vec![ChatChoice {
+                        index: 0,
+                        logprobs: None,
+                        finish_reason: "stop_from_cache".to_string(),
+                        message: ChatMessageJson {
+                            role: "assistant".to_string(),
+                            content: message_content,
+                        },
+                    }],
+                    usage: Usage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                    },
+                    stats: serde_json::Value::Null,
+                    system_fingerprint: "cached".to_string(),
+                };
+
+                println!("缓存命中");
+                Ok(Json(response))
+            }
+            Err(e) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("解析缓存内容失败: {}", e),
+            )),
+        },
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("解压缩缓存数据失败: {}", e),
+        )),
+    }
+}
+
+// 发送API请求
+async fn send_api_request(
+    client: reqwest::Client,
+    target_url: String,
+    payload_json: String,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<ChatResponseJson, (StatusCode, String)> {
+    println!("发送上游API请求");
+    
+    // 持有许可直到函数返回
+    let _permit = permit;
+    
+    // 构建请求
+    let request_builder = client
+        .post(&target_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "llm_api_rust_client/1.0");
+
+    // 发送请求
+    let response = match request_builder.body(payload_json.clone()).send().await {
+        Ok(res) => res,
+        Err(e) => {
+            // 尝试使用curl作为备选
+            let use_curl: bool = env::var("USE_CURL")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse::<bool>()
+                .unwrap_or(false);
+                
+            if use_curl {
+                return send_request_with_curl(&target_url, &payload_json).await;
+            } else {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("请求上游API失败: {}", e),
+                ));
+            }
+        }
+    };
+
+    // 处理响应
+    let status = response.status();
+    if !status.is_success() {
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "无法读取错误响应体".to_string());
+        return Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            format!("上游API返回错误: 状态码 = {}, 内容 = {}", status, error_body),
+        ));
+    }
+
+    // 读取响应体
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("读取上游响应失败: {}", e),
+            ));
+        }
+    };
+
+    // 解析响应体
+    match serde_json::from_str::<ChatResponseJson>(&text) {
+        Ok(json) => Ok(json),
+        Err(e) => {
+            eprintln!("解析上游响应失败: {}, Body: {}", e, text);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "处理上游响应失败".to_string()))
+        }
+    }
+}
+
 // chat_completion
 #[axum::debug_handler]
 pub async fn chat_completion(
-    State(app_state): State<Arc<(Arc<AppState>, TaskSender)>>,
+    State(app_state): State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
     Json(payload): Json<ChatRequestJson>,
 ) -> Response {
-    let (state, tx_hit) = {
-        let (state_ref, tx_hit_ref) = &*app_state;
-        (state_ref.clone(), tx_hit_ref.clone())
+    let (state, tx_hit, tx_miss) = {
+        let (state_ref, tx_hit_ref, tx_miss_ref) = &*app_state;
+        (state_ref.clone(), tx_hit_ref.clone(), tx_miss_ref.clone())
     };
-
-    // 创建响应通道（ tokio::sync::oneshot 的无锁版本）
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     // 从环境变量读取配置
     let cache_version: i32 = match env::var("CACHE_VERSION")
@@ -74,100 +221,47 @@ pub async fn chat_completion(
     hasher.update(user_message.content.as_bytes());
     let cache_key = hex::encode(hasher.finalize());
 
-    // 读取缓存
-    let cached_result = if cache_override_mode {
-        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ? AND version = ?")
-            .bind(cache_key.clone())
-            .bind(cache_version)
-            .fetch_optional(&*state.db)
-            .await
-    } else {
-        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ?")
-            .bind(cache_key.clone())
-            .fetch_optional(&*state.db)
-            .await
-    };
-
-    match cached_result {
-        Ok(Some((compressed_response,))) => {
-            // 缓存命中
-            let hit_task = Box::pin(async move {
-                // 解压缩处理
-                let mut decompressed = Vec::new();
-                let mut decompressor = brotli::Decompressor::new(
-                    compressed_response.as_slice(),
-                    compressed_response.len(),
-                );
-
-                let result = match std::io::copy(&mut decompressor, &mut decompressed) {
-                    Ok(_) => {
-                        match String::from_utf8(decompressed) {
-                            Ok(message_content) => {
-                                // 构建响应
-                                let response = ChatResponseJson {
-                                    id: format!("cache-hit-{}", Uuid::new_v4()),
-                                    object: "chat.completion".to_string(),
-                                    created: chrono::Utc::now().timestamp(),
-                                    model: payload.model.clone(),
-                                    choices: vec![ChatChoice {
-                                        index: 0,
-                                        logprobs: None,
-                                        finish_reason: "stop_from_cache".to_string(),
-                                        message: ChatMessageJson {
-                                            role: "assistant".to_string(),
-                                            content: message_content,
-                                        },
-                                    }],
-                                    usage: Usage {
-                                        prompt_tokens: 0,
-                                        completion_tokens: 0,
-                                        total_tokens: 0,
-                                    },
-                                    stats: serde_json::Value::Null,
-                                    system_fingerprint: "cached".to_string(),
-                                };
-
-                                println!("缓存命中");
-                                Ok(Json(response))
-                            }
-                            Err(e) => Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("解析缓存内容失败: {}", e),
-                            )),
-                        }
-                    }
-                    Err(e) => Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("解压缩缓存数据失败: {}", e),
-                    )),
+    // 处理主线程，同时实现两路处理
+    // 1. 创建响应通道
+    let (response_tx, response_rx) = oneshot::channel::<Result<Json<ChatResponseJson>, (StatusCode, String)>>();
+    
+    // 2. 开启并发处理
+    tokio::spawn(async move {
+        // 查询缓存（异步操作）
+        let cache_result = query_cache(
+            state.db.clone(),
+            cache_key.clone(), 
+            cache_version,
+            cache_override_mode
+        ).await;
+        
+        match cache_result {
+            Ok(Some(compressed_data)) => {
+                // 命中缓存，处理缓存数据
+                let hit_task = Box::pin(async move {
+                    let result = process_cached_response(compressed_data, payload.clone()).await;
+                    // 发送结果回调用者
+                    let _ = response_tx.send(result);
+                });
+                
+                // 发送到缓存命中处理线程池
+                let _ = tx_hit.send(hit_task).await;
+            },
+            Ok(None) => {
+                // 缓存未命中，准备API请求
+                // 创建信号量
+                let semaphore = Arc::new(Semaphore::new(state.max_concurrent_requests));
+                
+                // 准备API URL
+                let api_url = state.api_url.clone();
+                let target_url = if api_url.ends_with('/') {
+                    format!("{}v1/chat/completions", api_url)
+                } else {
+                    format!("{}/v1/chat/completions", api_url)
                 };
-
-                if response_tx.send(result).is_err() {
-                    // 如果发送失败，记录错误（可选）
-                    eprintln!("无法发送响应结果");
-                }
-            });
-            tx_hit.send(hit_task).await.unwrap();
-        }
-        Ok(None) => {
-            // 缓存未命中逻辑
-            // 克隆需要传递给异步任务的变量
-            let api_url_clone = state.api_url.clone();
-            // 确保API URL格式正确
-            let target_url = if api_url_clone.ends_with('/') {
-                format!("{}v1/chat/completions", api_url_clone)
-            } else {
-                format!("{}/v1/chat/completions", api_url_clone)
-            };
-            let client_clone = state.client.clone();
-            let payload_clone = payload.clone();
-            let cache_key_clone = cache_key.clone();
-            let db_clone = state.db.clone();
-            
-            // 立即请求上游 API 并返回结果
-            tokio::spawn(async move {
-                // 构建请求
-                let payload_json = match serde_json::to_string(&payload_clone) {
+                
+                // 序列化请求负载
+                let payload_json = match serde_json::to_string(&payload) {
                     Ok(json) => json,
                     Err(e) => {
                         let _ = response_tx.send(Err((
@@ -177,107 +271,65 @@ pub async fn chat_completion(
                         return;
                     }
                 };
-
                 
-                // 构建 reqwest 请求
-                let request_builder = client_clone
-                    .post(&target_url)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "llm_api_rust_client/1.0");
-
-                // 发送请求
-                let request_result = request_builder.body(payload_json.clone()).send().await;
-                
-                // 处理请求结果
-                let response_result = match request_result {
-                    Ok(res) => {
-                        // 检查上游 API 的响应状态码
-                        let status = res.status();
-                        if !status.is_success() {
-                            let error_body = res
-                                .text()
-                                .await
-                                .unwrap_or_else(|_| "无法读取错误响应体".to_string());
-                            eprintln!("上游API错误响应体 ({}): {}", status, error_body);
-                            Err((
-                                StatusCode::from_u16(status.as_u16())
-                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                                format!("上游API返回错误: 状态码 = {}", status),
-                            ))
-                        } else {
-                            // 读取响应体文本
-                            match res.text().await {
-                                Ok(text) => {
-                                    // 反序列化响应体
-                                    match serde_json::from_str::<ChatResponseJson>(&text) {
-                                        Ok(json) => Ok(json),
-                                        Err(e) => {
-                                            eprintln!("反序列化上游响应失败: {}, Body: {}", e, text);
-                                            Err((
-                                                StatusCode::INTERNAL_SERVER_ERROR,
-                                                "处理上游响应失败".to_string(),
-                                            ))
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    Err((
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        format!("读取上游响应失败: {}", e),
-                                    ))
-                                }
-                            }
-                        }
-                    }
+                // 获取信号量许可
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(permit) => permit,
                     Err(e) => {
-                        // reqwest 请求失败，尝试 curl
-                        eprintln!("使用 reqwest 客户端请求失败: {}, 尝试使用 curl 作为备选", e);
-                        let use_curl: bool = env::var("USE_CURL")
-                            .unwrap_or_else(|_| "false".to_string())
-                            .parse::<bool>()
-                            .unwrap_or(false);
-                        if use_curl {
-                            // 调用 curl 函数
-                            send_request_with_curl(&target_url, &payload_json).await
-                        } else {
-                            Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("请求上游API失败 (reqwest): {}", e),
-                            ))
-                        }
+                        eprintln!("获取信号量失败: {}", e);
+                        let _ = response_tx.send(Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "获取并发许可失败".to_string(),
+                        )));
+                        return;
                     }
                 };
-
-                // 根据处理结果创建新结果以发送给客户端
-                let new_result = match &response_result {
-                    Ok(json) => Ok(Json(json.clone())),
-                    Err((status, message)) => Err((*status, message.clone())),
-                };
                 
-                // 发送响应结果给等待的处理程序
-                let _ = response_tx.send(new_result);
+                // 创建API请求任务
+                let miss_task = Box::pin(async move {
+                    // 发送API请求并获取结果
+                    let api_result = send_api_request(
+                        state.client.clone(),
+                        target_url,
+                        payload_json,
+                        permit
+                    ).await;
+                    
+                    match &api_result {
+                        Ok(response_json) => {
+                            // 在后台缓存结果
+                            let response_clone = response_json.clone();
+                            let db_clone = state.db.clone();
+                            tokio::spawn(async move {
+                                cache_response(response_clone, cache_key, db_clone, cache_version).await;
+                            });
+                            
+                            // 返回结果
+                            let _ = response_tx.send(Ok(Json(response_json.clone())));
+                        },
+                        Err((status, message)) => {
+                            let _ = response_tx.send(Err((status.clone(), message.clone())));
+                        }
+                    }
+                });
                 
-                // 如果响应成功，在后台进行缓存写入操作
-                if let Ok(response_json) = response_result {
-                    tokio::spawn(async move {
-                        cache_response(response_json, cache_key_clone, db_clone, cache_version).await;
-                    });
-                }
-            });
+                // 发送到未命中缓存处理线程池
+                let _ = tx_miss.send(miss_task).await;
+            },
+            Err(e) => {
+                // 数据库查询错误
+                let _ = response_tx.send(Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("数据库查询错误: {}", e),
+                )));
+            }
         }
-        Err(e) => {
-            let _ = response_tx.send(Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("数据库查询错误: {}", e),
-            )));
-        }
-    }
+    });
 
-    // 等待响应
+    // 等待响应结果
     match response_rx.await {
         Ok(result) => result.into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "请求处理失败").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "处理请求失败").into_response(),
     }
 }
 
