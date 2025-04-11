@@ -12,3 +12,4 @@
 .vscode
 .idea
 *.env
+config.yaml
