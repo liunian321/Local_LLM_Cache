@@ -1,0 +1,15 @@
+database_url: "sqlite:cache.db"
+use_curl: false
+use_proxy: true
+cache_hit_pool_size: 4
+cache_miss_pool_size: 8
+max_concurrent_requests: 100
+cache_version: 0
+cache_override_mode: false
+api_endpoints:
+  - url: "http://127.0.0.1:1234"
+    weight: 1
+    model: ~
+  - url: "http://127.0.0.1:11434"
+    weight: 2
+    model: "llama3"

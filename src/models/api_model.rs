@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Semaphore;
 
-// 定义对外暴露的请求 JSON 数据结构
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatRequestJson {
     pub model: String,
@@ -15,7 +15,6 @@ pub struct ChatRequestJson {
     pub stream: bool,
 }
 
-// 定义返回给客户端的响应 JSON 结构
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatResponseJson {
     pub id: String,
@@ -24,7 +23,9 @@ pub struct ChatResponseJson {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
+    #[serde(default)]
     pub stats: serde_json::Value,
+    #[serde(default = "default_system_fingerprint")]
     pub system_fingerprint: String,
 }
 
@@ -32,43 +33,64 @@ pub struct ChatResponseJson {
 pub struct ChatChoice {
     pub index: i32,
     pub logprobs: Option<serde_json::Value>,
+    #[serde(default = "default_finish_reason")]
     pub finish_reason: String,
     pub message: ChatMessageJson,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Usage {
+    #[serde(default)]
     pub prompt_tokens: i32,
+    #[serde(default)]
     pub completion_tokens: i32,
+    #[serde(default)]
     pub total_tokens: i32,
 }
 
-// 为 ChatMessageJson 结构体添加 Serialize 派生宏
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessageJson {
     pub role: String,
     pub content: String,
 }
 
-// 修改 AppState 结构体，移除运行时
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ApiEndpoint {
+    pub url: String,
+    pub weight: u32,
+    pub model: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub db: Arc<SqlitePool>,
     pub client: reqwest::Client,
-    pub api_url: String,
+    pub api_endpoints: Vec<ApiEndpoint>,
     pub max_concurrent_requests: usize,
+    pub semaphore: Arc<Semaphore>,
+    pub cache_version: i32,
+    pub cache_override_mode: bool,
+    pub use_curl: bool,
+    pub use_proxy: bool,
+    pub api_headers: std::collections::HashMap<String, String>,
 }
 
-// 为 temperature 提供默认值
+fn default_system_fingerprint() -> String {
+    "unknown".to_string()
+}
+
 fn default_temperature() -> f32 {
     0.1
 }
 
-// 为 max_tokens 提供默认值
 fn default_max_tokens() -> i32 {
     -1
 }
 
-// 为 stream 提供默认值
 fn default_stream() -> bool {
     false
+}
+
+fn default_finish_reason() -> String {
+    "unknown".to_string()
 }

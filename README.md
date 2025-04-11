@@ -18,12 +18,39 @@
 解释
 
 - `DATABASE_URL`: SQLite 数据库的路径，默认为 `cache.db`。
-- `API_URL`: 上游 API 的地址，默认为 `http://127.0.0.1:1234`。
 - `USE_CURL`: 是否使用 `curl` 作为备选请求方式，默认为 `false`。
 - `CACHE_VERSION`: 用于搭配 `CACHE_OVERRIDE_MODE` 决定是否覆盖旧缓存。
 - `CACHE_OVERRIDE_MODE`: 是否开启缓存覆盖模式（如果你需要逐步更新已有的缓存的话）。
 - `CACHE_MISS_POOL_SIZE`: 缓存未命中线程池大小，默认为 `4`。
 - `CACHE_HIT_POOL_SIZE`: 缓存命中线程池大小，默认为 `64`。
+
+### 配置文件
+
+项目使用 `config.yaml` 进行配置，包含以下主要设置：
+
+```yaml
+database_url: "sqlite:cache.db"
+cache_version: 0
+cache_override_mode: false
+use_curl: false
+use_proxy: true
+api_headers:
+  Content-Type: "application/json"
+  Accept: "application/json"
+  User-Agent: "llm_api_rust_client/1.0"
+api_endpoints:
+  - url: "http://127.0.0.1:1234"
+    weight: 1
+    model: "model-name-1"
+  - url: "http://127.0.0.1:11434"
+    weight: 2
+    model: "model-name-2"
+```
+
+其中，`api_endpoints` 配置允许设置多个上游 API 端点，每个端点包含：
+- `url`: API 端点地址
+- `weight`: 权重值，用于负载均衡（权重越高被选中概率越大）
+- `model`: 模型名称，可以覆盖请求中指定的模型名称
 
 ### 启动服务
 
@@ -107,12 +134,39 @@ This is a lightweight, high-concurrency LLM (Large Language Model) API cache ser
 ### Environment Variables Configuration
 
 - `DATABASE_URL`: Path to the SQLite database, defaults to `cache.db`.
-- `API_URL`: Address of the upstream API, defaults to `http://127.0.0.1:1234`.
 - `USE_CURL`: Whether to use `curl` as an alternative request method, defaults to `false`.
 - `CACHE_VERSION`: Used in conjunction with `CACHE_OVERRIDE_MODE` to determine whether to override old cache.
 - `CACHE_OVERRIDE_MODE`: Whether to enable cache override mode (if you need to gradually update the existing cache).
 - `CACHE_MISS_POOL_SIZE`: Size of the cache miss thread pool, defaults to `4`.
 - `CACHE_HIT_POOL_SIZE`: Size of the cache hit thread pool, defaults to `64`.
+
+### Configuration File
+
+The project uses `config.yaml` for configuration, which includes the following main settings:
+
+```yaml
+database_url: "sqlite:cache.db"
+cache_version: 0
+cache_override_mode: false
+use_curl: false
+use_proxy: true
+api_headers:
+  Content-Type: "application/json"
+  Accept: "application/json"
+  User-Agent: "llm_api_rust_client/1.0"
+api_endpoints:
+  - url: "http://127.0.0.1:1234"
+    weight: 1
+    model: "model-name-1"
+  - url: "http://127.0.0.1:11434"
+    weight: 2
+    model: "model-name-2"
+```
+
+The `api_endpoints` configuration allows setting multiple upstream API endpoints, each containing:
+- `url`: API endpoint address
+- `weight`: Weight value for load balancing (higher weight means higher probability of being selected)
+- `model`: Model name, can override the model name specified in the request
 
 ### Starting the Service
 

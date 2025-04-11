@@ -1,23 +1,86 @@
-// 载入依赖与模块
 use axum::Router;
 use axum::{
     Json,
     extract::State,
     routing::{get, post},
 };
-use dotenv::dotenv;
 use llm_api::handlers::api_handler::{get_embeddings, get_models};
 use llm_api::handlers::chat_completion_handler::TaskSender;
 use llm_api::handlers::chat_completion_handler::chat_completion;
-use llm_api::models::api_model::AppState;
-use num_cpus;
+use llm_api::models::api_model::{ApiEndpoint, AppState};
 use reqwest;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use sqlx::Executor;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use std::{env, sync::Arc};
-use tokio::runtime::Runtime;
+use std::fs::File;
+use std::io::Read;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Config {
+    #[serde(default = "default_database_url")]
+    database_url: String,
+    api_endpoints: Vec<ApiEndpoint>,
+    #[serde(default = "default_use_curl")]
+    use_curl: bool,
+    #[serde(default = "default_use_proxy")]
+    use_proxy: bool,
+    #[serde(default = "default_cache_hit_pool_size")]
+    cache_hit_pool_size: usize,
+    #[serde(default = "default_cache_miss_pool_size")]
+    cache_miss_pool_size: usize,
+    #[serde(default = "default_max_concurrent_requests")]
+    max_concurrent_requests: usize,
+    #[serde(default = "default_cache_version")]
+    cache_version: i32,
+    #[serde(default = "default_cache_override_mode")]
+    cache_override_mode: bool,
+    #[serde(default = "default_api_headers")]
+    api_headers: std::collections::HashMap<String, String>,
+}
+
+fn default_database_url() -> String {
+    "sqlite:cache.db".to_string()
+}
+
+fn default_use_curl() -> bool {
+    false
+}
+
+fn default_use_proxy() -> bool {
+    true
+}
+
+fn default_cache_hit_pool_size() -> usize {
+    8
+}
+
+fn default_cache_miss_pool_size() -> usize {
+    8
+}
+
+fn default_max_concurrent_requests() -> usize {
+    100
+}
+
+fn default_cache_version() -> i32 {
+    0
+}
+
+fn default_cache_override_mode() -> bool {
+    false
+}
+
+// 默认头信息函数
+fn default_api_headers() -> std::collections::HashMap<String, String> {
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    headers.insert("Accept".to_string(), "application/json".to_string());
+    headers
+}
 
 // 初始化数据库
 async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
@@ -37,50 +100,31 @@ async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
 
 #[tokio::main]
 async fn main() {
-    dotenv().ok();
-    // 从环境变量加载数据库与 API 地址
-    let database_url: String =
-        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:cache.db".to_string());
-    let api_url: String =
-        env::var("API_URL").unwrap_or_else(|_| "http://127.0.0.1:1234".to_string());
-    let use_curl: bool = env::var("USE_CURL")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-    let cache_hit_pool_size: usize = env::var("CACHE_HIT_POOL_SIZE")
-        .unwrap_or_else(|_| (num_cpus::get() * 2).to_string())
-        .parse()
-        .expect("无法解析 CACHE_HIT_POOL_SIZE");
-    let cache_miss_pool_size: usize = env::var("CACHE_MISS_POOL_SIZE")
-        .unwrap_or_else(|_| (num_cpus::get() * 4).to_string())
-        .parse()
-        .expect("无法解析 CACHE_MISS_POOL_SIZE");
-    let max_concurrent_requests: usize = env::var("MAX_CONCURRENT_REQUESTS")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse()
-        .expect("无法解析 MAX_CONCURRENT_REQUESTS");
+    let mut file = File::open("config.yaml").expect("无法打开配置文件");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .expect("无法读取配置文件");
+    let config: Config = serde_yaml::from_str(&contents).expect("解析配置文件失败");
 
     println!(
-        "服务配置: 数据库={}, API地址={}, 使用curl={}, 最大并发请求={}",
-        database_url, api_url, use_curl, max_concurrent_requests
+        "服务配置: 数据库={}, 使用curl={}, 最大并发请求={}",
+        config.database_url, config.use_curl, config.max_concurrent_requests
     );
 
-    // 打开 SQLite 连接池
     let pool = SqlitePoolOptions::new()
         .max_connections(100)
-        .min_connections(5) // 最小连接数
+        .min_connections(5)
         .connect_with(
             SqliteConnectOptions::new()
-                .filename(&database_url)
+                .filename(&config.database_url)
                 .create_if_missing(true),
         )
         .await
         .expect("无法打开数据库");
 
-    // 初始化数据库
     init_db(&pool).await.expect("数据库初始化失败");
 
-    // 配置数据库优化参数
+    // 数据库优化参数
     let pragmas = [
         "PRAGMA journal_mode=WAL;",
         "PRAGMA wal_autocheckpoint=4;",
@@ -89,7 +133,7 @@ async fn main() {
         "PRAGMA synchronous=NORMAL;",
         "PRAGMA cache_size=10000;",
         "PRAGMA temp_store=MEMORY;",
-        "PRAGMA mmap_size=30000000000;"
+        "PRAGMA mmap_size=30000000000;",
     ];
 
     for pragma in pragmas.iter() {
@@ -98,51 +142,59 @@ async fn main() {
         }
     }
 
-    // 专门用于处理命中缓存的运行时
-    let hit_runtime: Arc<Runtime> = Arc::new(
+    let hit_runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(cache_hit_pool_size) 
+            .worker_threads(config.cache_hit_pool_size)
             .thread_name("cache-hit-pool")
-            .enable_all() 
+            .enable_all()
             .build()
             .expect("无法创建缓存命中处理运行时"),
     );
 
-    // 专门用于处理未命中缓存的运行时
-    let miss_runtime: Arc<Runtime> = Arc::new(
+    let miss_runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(cache_miss_pool_size) 
+            .worker_threads(config.cache_miss_pool_size)
             .thread_name("cache-miss-pool")
-            .enable_all() 
+            .enable_all()
             .build()
             .expect("无法创建缓存未命中处理运行时"),
     );
 
     println!(
         "已创建专门处理缓存命中的线程池，线程数: {}",
-        cache_hit_pool_size
+        config.cache_hit_pool_size
     );
     println!(
         "已创建专门处理缓存未命中的线程池，线程数: {}",
-        cache_miss_pool_size
+        config.cache_miss_pool_size
     );
 
+    println!("创建HTTP客户端...");
+    // 明确创建不使用任何代理的HTTP客户端
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(1800))
-        // .http2_prior_knowledge() // 启用 HTTP/2
-        .pool_max_idle_per_host(max_concurrent_requests) // 最大保持连接数
-        .tcp_keepalive(Some(std::time::Duration::from_secs(60))) // TCP连接保活
-        .pool_idle_timeout(std::time::Duration::from_secs(600)) // 闲置连接超时时间
-        .tcp_nodelay(true) // 设置TCP_NODELAY
-        .danger_accept_invalid_certs(true) // 接受自签名证书
+        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .tcp_nodelay(true)
+        .pool_idle_timeout(std::time::Duration::from_secs(120))
+        .pool_max_idle_per_host(30)
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .http1_title_case_headers()
+        .no_proxy() // 禁用代理
         .build()
         .expect("无法创建HTTP客户端");
 
-    let shared_state: Arc<AppState> = Arc::new(AppState {
+    let shared_state = Arc::new(AppState {
         db: Arc::new(pool),
         client: http_client,
-        api_url,
-        max_concurrent_requests,
+        api_endpoints: config.api_endpoints.clone(),
+        max_concurrent_requests: config.max_concurrent_requests,
+        semaphore: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+        cache_version: config.cache_version,
+        cache_override_mode: config.cache_override_mode,
+        use_curl: config.use_curl,
+        use_proxy: config.use_proxy,
+        api_headers: config.api_headers,
     });
 
     // 处理命中缓存请求的通道
@@ -167,17 +219,16 @@ async fn main() {
         }
     });
 
-    // 将通道发送端添加到应用状态
-    let app_state = Arc::new((shared_state, tx_hit, tx_miss));
+    let app_state = Arc::new((shared_state.clone(), tx_hit, tx_miss));
 
-    // 构建 Axum 路由
     let v1_router = Router::new()
         .route("/v1/chat/completions", post(chat_completion))
         .route(
             "/v1/models",
             get(
-                |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>| async move {
-                    get_models(State(state.0.0.clone())).await
+                |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
+                 headers: axum::http::HeaderMap| async move {
+                    get_models(State(state.0.0.clone()), headers).await
                 },
             ),
         )
@@ -185,8 +236,9 @@ async fn main() {
             "/v1/embeddings",
             post(
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
+                 headers: axum::http::HeaderMap,
                  payload: Json<serde_json::Value>| async move {
-                    get_embeddings(State(state.0.0.clone()), payload).await
+                    get_embeddings(State(state.0.0.clone()), headers, payload).await
                 },
             ),
         );
@@ -196,8 +248,9 @@ async fn main() {
         .route(
             "/models",
             get(
-                |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>| async move {
-                    get_models(State(state.0.0.clone())).await
+                |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
+                 headers: axum::http::HeaderMap| async move {
+                    get_models(State(state.0.0.clone()), headers).await
                 },
             ),
         )
@@ -205,8 +258,9 @@ async fn main() {
             "/embeddings",
             post(
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
+                 headers: axum::http::HeaderMap,
                  payload: Json<serde_json::Value>| async move {
-                    get_embeddings(State(state.0.0.clone()), payload).await
+                    get_embeddings(State(state.0.0.clone()), headers, payload).await
                 },
             ),
         );
@@ -215,16 +269,18 @@ async fn main() {
         .merge(v1_router)
         .merge(no_prefix_router)
         // 并发限制
-        .layer(tower::limit::ConcurrencyLimitLayer::new(max_concurrent_requests)) 
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            config.max_concurrent_requests,
+        ))
         .with_state(app_state);
 
     println!("正在启动服务器...");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4321").await.unwrap();
     println!("服务器正在监听: 4321 端口, 请访问 http://127.0.0.1:4321/v1/chat/completions");
-    
+
     let server = axum::serve(listener, app.into_make_service());
-    
-    println!("服务器已就绪，可以接收并发请求!");
-    
+
+    println!("服务器已就绪!");
+
     server.await.unwrap();
 }
