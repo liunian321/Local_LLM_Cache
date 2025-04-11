@@ -1,10 +1,10 @@
-use crate::models::api_model::{ApiEndpoint, AppState, ChatResponseJson, ChatChoice, ChatMessageJson, Usage};
+use crate::models::api_model::{
+    AppState, ChatChoice, ChatMessageJson, ChatResponseJson, Usage, select_api_endpoint,
+};
 use axum::{
     extract::{Json, State},
     http::StatusCode,
 };
-use rand::{prelude::*, rng};
-use rand_distr::weighted::WeightedIndex;
 use std::sync::Arc;
 
 // 使用 curl 发送请求函数
@@ -90,64 +90,107 @@ pub async fn send_request_with_curl(
                     let choices = match generic_json.get("choices") {
                         Some(choices) => {
                             if let Some(choices_array) = choices.as_array() {
-                                choices_array.iter().enumerate().map(|(idx, choice)| {
-                                    let content = match choice.get("message").and_then(|m| m.get("content")) {
-                                        Some(content) => content.as_str().unwrap_or("").to_string(),
-                                        None => "".to_string(),
-                                    };
-                                    
-                                    let role = match choice.get("message").and_then(|m| m.get("role")) {
-                                        Some(role) => role.as_str().unwrap_or("assistant").to_string(),
-                                        None => "assistant".to_string(),
-                                    };
-                                    
-                                    let finish_reason = match choice.get("finish_reason") {
-                                        Some(reason) => reason.as_str().unwrap_or("unknown").to_string(),
-                                        None => "unknown".to_string(),
-                                    };
-                                    
-                                    ChatChoice {
-                                        index: idx as i32,
-                                        logprobs: None,
-                                        finish_reason,
-                                        message: ChatMessageJson {
-                                            role,
-                                            content,
+                                choices_array
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, choice)| {
+                                        let content = match choice
+                                            .get("message")
+                                            .and_then(|m| m.get("content"))
+                                        {
+                                            Some(content) => {
+                                                content.as_str().unwrap_or("").to_string()
+                                            }
+                                            None => "".to_string(),
+                                        };
+
+                                        let role =
+                                            match choice.get("message").and_then(|m| m.get("role"))
+                                            {
+                                                Some(role) => {
+                                                    role.as_str().unwrap_or("assistant").to_string()
+                                                }
+                                                None => "assistant".to_string(),
+                                            };
+
+                                        let finish_reason = match choice.get("finish_reason") {
+                                            Some(reason) => {
+                                                reason.as_str().unwrap_or("unknown").to_string()
+                                            }
+                                            None => "unknown".to_string(),
+                                        };
+
+                                        ChatChoice {
+                                            index: idx as i32,
+                                            logprobs: None,
+                                            finish_reason,
+                                            message: ChatMessageJson { role, content },
                                         }
-                                    }
-                                }).collect()
+                                    })
+                                    .collect()
                             } else {
                                 vec![]
                             }
-                        },
+                        }
                         None => vec![],
                     };
-                    
+
                     if choices.is_empty() {
                         return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("解析curl响应失败: {}", e),
                         ));
                     }
-                    
+
                     // 构造一个有效的响应对象
                     let response = ChatResponseJson {
-                        id: generic_json.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                        object: generic_json.get("object").and_then(|v| v.as_str()).unwrap_or("chat.completion").to_string(),
-                        created: generic_json.get("created").and_then(|v| v.as_i64()).unwrap_or(chrono::Utc::now().timestamp()),
-                        model: generic_json.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                        id: generic_json
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        object: generic_json
+                            .get("object")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("chat.completion")
+                            .to_string(),
+                        created: generic_json
+                            .get("created")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(chrono::Utc::now().timestamp()),
+                        model: generic_json
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
                         choices,
                         usage: Usage {
-                            prompt_tokens: generic_json.get("usage").and_then(|u| u.get("prompt_tokens")).and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                            completion_tokens: generic_json.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                            total_tokens: generic_json.get("usage").and_then(|u| u.get("total_tokens")).and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            prompt_tokens: generic_json
+                                .get("usage")
+                                .and_then(|u| u.get("prompt_tokens"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0) as i32,
+                            completion_tokens: generic_json
+                                .get("usage")
+                                .and_then(|u| u.get("completion_tokens"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0) as i32,
+                            total_tokens: generic_json
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0) as i32,
                         },
                         stats: serde_json::Value::Null,
-                        system_fingerprint: generic_json.get("system_fingerprint").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                        system_fingerprint: generic_json
+                            .get("system_fingerprint")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
                     };
-                    
+
                     Ok(response)
-                },
+                }
                 Err(parse_err) => {
                     println!("解析为通用JSON也失败: {}", parse_err);
                     Err((
@@ -158,39 +201,6 @@ pub async fn send_request_with_curl(
             }
         }
     }
-}
-
-// 添加 API 选择函数
-fn select_api_endpoint(endpoints: &[ApiEndpoint]) -> Option<ApiEndpoint> {
-    if endpoints.is_empty() {
-        return None;
-    }
-
-    // 过滤掉权重为0的端点
-    let valid_endpoints: Vec<&ApiEndpoint> = endpoints
-        .iter()
-        .filter(|endpoint| endpoint.weight > 0)
-        .collect();
-
-    if valid_endpoints.is_empty() {
-        // 如果没有有效端点(权重>0)，则返回第一个（不论权重如何）
-        return Some(endpoints[0].clone());
-    }
-
-    // 使用加权随机选择
-    let weights: Vec<u32> = valid_endpoints.iter().map(|ep| ep.weight).collect();
-    let dist = match WeightedIndex::new(&weights) {
-        Ok(d) => d,
-        Err(e) => {
-            // 如果权重总和为0或其他错误，则退回到选择第一个有效端点
-            eprintln!("创建加权索引失败: {}。将选择第一个有效端点。", e);
-            return Some((*valid_endpoints[0]).clone());
-        }
-    };
-
-    let mut rng = rng();
-    let chosen_index = dist.sample(&mut rng);
-    Some((*valid_endpoints[chosen_index]).clone())
 }
 
 // 处理 /v1/models 路由的请求

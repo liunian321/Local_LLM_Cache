@@ -16,8 +16,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Config {
@@ -82,19 +82,66 @@ fn default_api_headers() -> std::collections::HashMap<String, String> {
     headers
 }
 
-// 初始化数据库
+// 优化数据库初始化和配置
 async fn init_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    // 创建缓存表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS cache (
             key TEXT PRIMARY KEY,
             response BLOB NOT NULL,
             size INTEGER NOT NULL,
             hit_count INTEGER NOT NULL DEFAULT 0,
-            version INTEGER NOT NULL DEFAULT 0
+            version INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )",
     )
     .execute(pool)
     .await?;
+
+    // 创建索引以提高查询速度
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cache_key ON cache(key)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cache_version ON cache(version)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+// 优化数据库参数
+async fn optimize_db(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+    // 数据库优化参数
+    let pragmas = [
+        "PRAGMA journal_mode=WAL;",
+        "PRAGMA wal_autocheckpoint=1000;", // 增加检查点间隔以提高写入性能
+        "PRAGMA wal_checkpoint(PASSIVE);", // 使用被动检查点避免阻塞
+        "PRAGMA read_uncommitted=true;",
+        "PRAGMA synchronous=NORMAL;",
+        "PRAGMA cache_size=20000;", // 增加缓存大小
+        "PRAGMA temp_store=MEMORY;",
+        "PRAGMA mmap_size=30000000000;",
+        "PRAGMA page_size=4096;",    // 使用更高效的页大小
+        "PRAGMA busy_timeout=5000;", // 设置忙等待超时
+        "PRAGMA foreign_keys=OFF;",  // 关闭外键约束检查以提高性能
+    ];
+
+    for pragma in pragmas.iter() {
+        match pool.execute(*pragma).await {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("设置SQLite参数失败 ({}): {}", pragma, e);
+            }
+        }
+    }
+
+    // 运行一次VACUUM来整理数据库
+    match pool.execute("VACUUM;").await {
+        Ok(_) => println!("数据库VACUUM成功"),
+        Err(e) => eprintln!("数据库VACUUM失败: {}", e),
+    }
+
     Ok(())
 }
 
@@ -111,36 +158,25 @@ async fn main() {
         config.database_url, config.use_curl, config.max_concurrent_requests
     );
 
+    // 使用优化的连接选项
     let pool = SqlitePoolOptions::new()
         .max_connections(100)
-        .min_connections(5)
+        .min_connections(10) // 增加最小连接数，降低连接启动开销
+        .max_lifetime(std::time::Duration::from_secs(1800)) // 连接最长生命周期30分钟
+        .idle_timeout(std::time::Duration::from_secs(600)) // 闲置超时10分钟
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(&config.database_url)
-                .create_if_missing(true),
+                .create_if_missing(true)
+                .foreign_keys(false) // 禁用外键约束检查以提高性能
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal) // 使用WAL模式
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal), // 降低同步级别
         )
         .await
         .expect("无法打开数据库");
 
     init_db(&pool).await.expect("数据库初始化失败");
-
-    // 数据库优化参数
-    let pragmas = [
-        "PRAGMA journal_mode=WAL;",
-        "PRAGMA wal_autocheckpoint=4;",
-        "PRAGMA wal_checkpoint(FULL);",
-        "PRAGMA read_uncommitted=true;",
-        "PRAGMA synchronous=NORMAL;",
-        "PRAGMA cache_size=10000;",
-        "PRAGMA temp_store=MEMORY;",
-        "PRAGMA mmap_size=30000000000;",
-    ];
-
-    for pragma in pragmas.iter() {
-        if let Err(e) = pool.execute(*pragma).await {
-            eprintln!("设置SQLite参数失败 ({}): {}", pragma, e);
-        }
-    }
+    optimize_db(&pool).await.expect("数据库优化失败");
 
     let hit_runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -170,16 +206,21 @@ async fn main() {
     );
 
     println!("创建HTTP客户端...");
-    // 明确创建不使用任何代理的HTTP客户端
+    // 优化HTTP客户端配置
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .connect_timeout(std::time::Duration::from_secs(10))
         .tcp_nodelay(true)
-        .pool_idle_timeout(std::time::Duration::from_secs(120))
-        .pool_max_idle_per_host(30)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+        .pool_idle_timeout(std::time::Duration::from_secs(180)) // 增加空闲连接超时
+        .pool_max_idle_per_host(50) // 增加每个主机最大空闲连接数
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
         .http1_title_case_headers()
+        .http2_adaptive_window(true) // 启用HTTP/2自适应窗口大小
+        .http2_keep_alive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(30))
+        .http2_initial_stream_window_size(1024 * 1024) // 1MB窗口大小
         .no_proxy() // 禁用代理
         .build()
         .expect("无法创建HTTP客户端");

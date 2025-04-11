@@ -1,7 +1,8 @@
 use crate::handlers::api_handler::send_request_with_curl;
 use crate::handlers::proxy_handler::send_proxied_request;
 use crate::models::api_model::{
-    ApiEndpoint, AppState, ChatChoice, ChatMessageJson, ChatRequestJson, ChatResponseJson, Usage,
+    AppState, ChatChoice, ChatMessageJson, ChatRequestJson, ChatResponseJson, Usage,
+    select_api_endpoint,
 };
 use axum::{
     extract::{Json, State},
@@ -10,8 +11,6 @@ use axum::{
 };
 use brotli::CompressorWriter;
 use futures::future::BoxFuture;
-use rand::{prelude::*, rng};
-use rand_distr::weighted::WeightedIndex;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::io::Write;
@@ -21,7 +20,7 @@ use uuid::Uuid;
 
 pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 
-// 缓存查询的异步函数
+// 缓存查询的异步函数 - 性能优化版本
 async fn query_cache(
     db: Arc<sqlx::SqlitePool>,
     cache_key: String,
@@ -29,19 +28,43 @@ async fn query_cache(
     cache_override_mode: bool,
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
     println!("并行查询缓存");
+
+    // 使用更优化的查询策略：添加行锁提示和有限制结果
     // 根据缓存覆盖模式选择查询方式
     let result = if cache_override_mode {
-        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ? AND version = ?")
-            .bind(cache_key.clone())
-            .bind(cache_version)
-            .fetch_optional(&*db)
-            .await?
+        sqlx::query_as::<_, (Vec<u8>,)>(
+            "SELECT response FROM cache WHERE key = ? AND version = ? LIMIT 1",
+        )
+        .bind(cache_key.clone())
+        .bind(cache_version)
+        .fetch_optional(&*db)
+        .await?
     } else {
-        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ?")
+        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ? LIMIT 1")
             .bind(cache_key.clone())
             .fetch_optional(&*db)
             .await?
     };
+
+    // 如果找到缓存项，更新命中计数，但不阻塞主流程
+    if result.is_some() {
+        let key_clone = cache_key.clone();
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            // 使用原子更新来增加命中计数
+            match sqlx::query("UPDATE cache SET hit_count = hit_count + 1 WHERE key = ?")
+                .bind(key_clone)
+                .execute(&*db_clone)
+                .await
+            {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("更新缓存命中计数失败: {}", e);
+                }
+            }
+        });
+    }
+
     Ok(result.map(|(data,)| data))
 }
 
@@ -121,7 +144,7 @@ async fn send_api_request(
     } else if use_proxy {
         println!("[{}] 使用代理模式发送请求", request_id);
         let result =
-            send_proxied_request(client.clone(), &target_url, &payload_json, headers).await;
+            send_proxied_request( &target_url, &payload_json, headers).await;
         println!(
             "[{}] 代理请求已完成 ({:?})",
             request_id,
@@ -149,9 +172,7 @@ async fn send_api_request(
     )
     .await
     {
-        Ok(Ok(response)) => {
-            response
-        }
+        Ok(Ok(response)) => response,
         Ok(Err(e)) => {
             println!("[{}] 请求失败: {}", request_id, e);
             if e.is_connect() {
@@ -183,11 +204,9 @@ async fn send_api_request(
     // 检查状态码
     if !response.status().is_success() {
         return Err((
-            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            format!(
-                "上游服务器返回错误: {:?}",
-                response
-            ),
+            StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            format!("上游服务器返回错误: {:?}", response),
         ));
     }
 
@@ -272,10 +291,7 @@ async fn send_api_request(
                         println!("[{}] 无法从通用JSON中提取有效的消息内容", request_id);
                         return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            format!(
-                                "解析响应JSON失败: {}",
-                                e
-                            ),
+                            format!("解析响应JSON失败: {}", e),
                         ));
                     }
 
@@ -332,48 +348,12 @@ async fn send_api_request(
                     println!("[{}] 解析为通用JSON也失败: {}", request_id, parse_err);
                     Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "解析响应JSON失败: {}",
-                            e
-                        ),
+                        format!("解析响应JSON失败: {}", e),
                     ))
                 }
             }
         }
     }
-}
-
-// 权重选择 API 函数 - 更新实现
-fn select_api_endpoint(endpoints: &[ApiEndpoint]) -> Option<ApiEndpoint> {
-    if endpoints.is_empty() {
-        return None;
-    }
-
-    // 过滤掉权重为0的端点
-    let valid_endpoints: Vec<&ApiEndpoint> = endpoints
-        .iter()
-        .filter(|endpoint| endpoint.weight > 0)
-        .collect();
-
-    if valid_endpoints.is_empty() {
-        // 如果没有有效端点(权重>0)，则返回第一个（不论权重如何）
-        return Some(endpoints[0].clone());
-    }
-
-    // 使用加权随机选择
-    let weights: Vec<u32> = valid_endpoints.iter().map(|ep| ep.weight).collect();
-    let dist = match WeightedIndex::new(&weights) {
-        Ok(d) => d,
-        Err(e) => {
-            // 如果权重总和为0或其他错误，则退回到选择第一个有效端点
-            eprintln!("创建加权索引失败: {}。将选择第一个有效端点。", e);
-            return Some((*valid_endpoints[0]).clone());
-        }
-    };
-
-    let mut rng = rng();
-    let chosen_index = dist.sample(&mut rng);
-    Some((*valid_endpoints[chosen_index]).clone())
 }
 
 // chat_completion
@@ -474,10 +454,7 @@ pub async fn chat_completion(
             }
         }
         Ok(None) => {
-            println!(
-                "[{}] 缓存未命中. 将进行API请求",
-                request_id
-            );
+            println!("[{}] 缓存未命中. 将进行API请求", request_id);
 
             // 获取信号量
             println!(
@@ -538,7 +515,6 @@ pub async fn chat_completion(
 
             // 如果端点配置了model，则使用端点配置的model
             if let Some(model) = selected_endpoint.model {
-                let original_model = payload_clone.model.clone();
                 payload_clone.model = model;
             }
 
@@ -616,7 +592,7 @@ pub async fn chat_completion(
     }
 }
 
-// 缓存响应函数
+// 缓存响应函数 - 优化版本
 async fn cache_response(
     response_json: ChatResponseJson,
     cache_key: String,
@@ -636,7 +612,7 @@ async fn cache_response(
 
     // 压缩消息内容
     let message_bytes = message_content.as_bytes();
-    let mut compressed = Vec::new();
+    let mut compressed = Vec::with_capacity(message_bytes.len() / 2); // 预分配大小
     {
         let mut compressor = CompressorWriter::new(&mut compressed, 4096, 11, 22);
         if let Err(e) = compressor.write_all(message_bytes) {
@@ -650,9 +626,19 @@ async fn cache_response(
     }
 
     let data_size = compressed.len() as i64;
+    let cache_max_size = 5 * 1024 * 1024; // 5MB
 
-    // 缓存响应
-    let insert_result = sqlx::query(
+    // 如果压缩后大小超过限制，跳过缓存
+    if data_size > cache_max_size {
+        eprintln!(
+            "响应体积过大 ({} bytes)，超过缓存限制 ({} bytes)，跳过缓存",
+            data_size, cache_max_size
+        );
+        return;
+    }
+
+    // 使用带有数据替换冲突策略的事务
+    let tx_result = sqlx::query(
         "INSERT OR REPLACE INTO cache (key, response, size, hit_count, version) VALUES (?, ?, ?, 0, ?)"
     )
     .bind(cache_key.clone())
@@ -662,7 +648,7 @@ async fn cache_response(
     .execute(&*db)
     .await;
 
-    match insert_result {
+    match tx_result {
         Ok(_) => {
             println!("成功缓存响应 Size: {}", data_size);
         }

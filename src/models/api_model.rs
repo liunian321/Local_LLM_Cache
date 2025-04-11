@@ -1,6 +1,8 @@
+use rand::prelude::*;
+use rand_distr::weighted::WeightedIndex;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -93,4 +95,31 @@ fn default_stream() -> bool {
 
 fn default_finish_reason() -> String {
     "unknown".to_string()
+}
+
+pub fn select_api_endpoint(endpoints: &[ApiEndpoint]) -> Option<ApiEndpoint> {
+    if endpoints.is_empty() {
+        return None;
+    }
+
+    let valid_endpoints: Vec<&ApiEndpoint> = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.weight > 0)
+        .collect();
+
+    if valid_endpoints.is_empty() {
+        return Some(endpoints[0].clone());
+    }
+
+    let weights: Vec<u32> = valid_endpoints.iter().map(|ep| ep.weight).collect();
+
+    let mut rng = rand::rng();
+
+    match WeightedIndex::new(&weights) {
+        Ok(dist) => {
+            let chosen_index = dist.sample(&mut rng);
+            Some((*valid_endpoints[chosen_index]).clone())
+        }
+        Err(_) => Some((*valid_endpoints[0]).clone()),
+    }
 }
