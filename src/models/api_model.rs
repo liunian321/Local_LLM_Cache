@@ -59,8 +59,10 @@ pub struct ChatMessageJson {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ApiEndpoint {
     pub url: String,
-    pub weight: u32,
+    pub weight: u8,
     pub model: Option<String>,
+    #[serde(default = "default_version")]
+    pub version: u8,
 }
 
 #[derive(Clone)]
@@ -70,7 +72,6 @@ pub struct AppState {
     pub api_endpoints: Vec<ApiEndpoint>,
     pub max_concurrent_requests: usize,
     pub semaphore: Arc<Semaphore>,
-    pub cache_version: i32,
     pub cache_override_mode: bool,
     pub use_curl: bool,
     pub use_proxy: bool,
@@ -97,6 +98,10 @@ fn default_finish_reason() -> String {
     "unknown".to_string()
 }
 
+fn default_version() -> u8 {
+    0
+}
+
 pub fn select_api_endpoint(endpoints: &[ApiEndpoint]) -> Option<ApiEndpoint> {
     if endpoints.is_empty() {
         return None;
@@ -111,7 +116,7 @@ pub fn select_api_endpoint(endpoints: &[ApiEndpoint]) -> Option<ApiEndpoint> {
         return Some(endpoints[0].clone());
     }
 
-    let weights: Vec<u32> = valid_endpoints.iter().map(|ep| ep.weight).collect();
+    let weights: Vec<u8> = valid_endpoints.iter().map(|ep| ep.weight).collect();
 
     let mut rng = rand::rng();
 

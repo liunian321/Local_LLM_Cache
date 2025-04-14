@@ -12,7 +12,6 @@ use axum::{
 use brotli::CompressorWriter;
 use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
-use std::env;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +23,7 @@ pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 async fn query_cache(
     db: Arc<sqlx::SqlitePool>,
     cache_key: String,
-    cache_version: i32,
+    cache_version: u8,
     cache_override_mode: bool,
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
     println!("并行查询缓存");
@@ -33,7 +32,7 @@ async fn query_cache(
     // 根据缓存覆盖模式选择查询方式
     let result = if cache_override_mode {
         sqlx::query_as::<_, (Vec<u8>,)>(
-            "SELECT response FROM cache WHERE key = ? AND version = ? LIMIT 1",
+            "SELECT response FROM cache WHERE key = ? AND version >= ? LIMIT 1",
         )
         .bind(cache_key.clone())
         .bind(cache_version)
@@ -143,8 +142,7 @@ async fn send_api_request(
         return send_request_with_curl(&target_url, &payload_json).await;
     } else if use_proxy {
         println!("[{}] 使用代理模式发送请求", request_id);
-        let result =
-            send_proxied_request( &target_url, &payload_json, headers).await;
+        let result = send_proxied_request(&target_url, &payload_json, headers).await;
         println!(
             "[{}] 代理请求已完成 ({:?})",
             request_id,
@@ -374,35 +372,6 @@ pub async fn chat_completion(
         (state_ref.clone(), tx_hit_ref.clone(), tx_miss_ref.clone())
     };
 
-    // 从环境变量读取配置
-    let cache_version: i32 = match env::var("CACHE_VERSION")
-        .unwrap_or_else(|_| "0".to_string())
-        .parse()
-    {
-        Ok(v) => v,
-        Err(e) => {
-            println!("[{}] 解析 CACHE_VERSION 错误: {}", request_id, e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("解析缓存版本失败: {}", e),
-            )
-                .into_response();
-        }
-    };
-    let cache_override_mode: bool = match env::var("CACHE_OVERRIDE_MODE")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse()
-    {
-        Ok(v) => v,
-        Err(e) => {
-            println!("[{}] 解析 CACHE_OVERRIDE_MODE 错误: {}", request_id, e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("解析覆盖模式失败: {}", e),
-            )
-                .into_response();
-        }
-    };
     // 提取用户消息并计算缓存键
     let user_message = match payload
         .messages
@@ -420,6 +389,20 @@ pub async fn chat_completion(
     hasher.update(user_message.content.as_bytes());
     let cache_key = hex::encode(hasher.finalize());
 
+    // 选择API端点
+    let selected_endpoint = if !state.api_endpoints.is_empty() {
+        match select_api_endpoint(&state.api_endpoints) {
+            Some(endpoint) => endpoint,
+            None => {
+                println!("[{}] 错误: 没有可用的API端点", request_id);
+                return (StatusCode::SERVICE_UNAVAILABLE, "没有可用的 API 端点").into_response();
+            }
+        }
+    } else {
+        println!("[{}] 错误: API端点列表为空", request_id);
+        return (StatusCode::SERVICE_UNAVAILABLE, "没有配置 API 端点").into_response();
+    };
+
     // 如果是流式请求，跳过缓存
     let skip_cache = payload.stream;
 
@@ -430,8 +413,8 @@ pub async fn chat_completion(
         query_cache(
             state.db.clone(),
             cache_key.clone(),
-            cache_version,
-            cache_override_mode,
+            selected_endpoint.version,
+            state.cache_override_mode,
         )
         .await
     };
@@ -487,21 +470,6 @@ pub async fn chat_completion(
                     return (StatusCode::SERVICE_UNAVAILABLE, "服务器忙，请稍后再试")
                         .into_response();
                 }
-            };
-
-            // 选择API端点
-            let selected_endpoint = if !state.api_endpoints.is_empty() {
-                match select_api_endpoint(&state.api_endpoints) {
-                    Some(endpoint) => endpoint,
-                    None => {
-                        println!("[{}] 错误: 没有可用的API端点", request_id);
-                        return (StatusCode::SERVICE_UNAVAILABLE, "没有可用的 API 端点")
-                            .into_response();
-                    }
-                }
-            } else {
-                println!("[{}] 错误: API端点列表为空", request_id);
-                return (StatusCode::SERVICE_UNAVAILABLE, "没有配置 API 端点").into_response();
             };
 
             let target_url = if selected_endpoint.url.ends_with('/') {
@@ -570,8 +538,13 @@ pub async fn chat_completion(
                     // 在后台执行缓存操作（如果不是流式请求）
                     if !skip_cache {
                         tokio::spawn(async move {
-                            cache_response(response_clone, cache_key, db_clone, cache_version)
-                                .await;
+                            cache_response(
+                                response_clone,
+                                cache_key,
+                                db_clone,
+                                selected_endpoint.version,
+                            )
+                            .await;
                         });
                     }
 
@@ -597,7 +570,7 @@ async fn cache_response(
     response_json: ChatResponseJson,
     cache_key: String,
     db: Arc<sqlx::SqlitePool>,
-    cache_version: i32,
+    cache_version: u8,
 ) {
     if response_json.choices.is_empty() {
         eprintln!("上游 API 返回的 choices 数组为空，跳过缓存");

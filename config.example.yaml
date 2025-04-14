@@ -1,4 +1,4 @@
-database_url: "sqlite:cache.db"
+database_url: "cache.db"
 use_curl: false
 use_proxy: true
 cache_hit_pool_size: 4
@@ -9,7 +9,9 @@ cache_override_mode: false
 api_endpoints:
   - url: "http://127.0.0.1:1234"
     weight: 1
-    model: ~
+    version: 0
+    model: "gemma-3-text-4b-it"
   - url: "http://127.0.0.1:11434"
     weight: 2
+    version: 1
     model: "llama3"

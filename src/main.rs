@@ -34,8 +34,6 @@ struct Config {
     cache_miss_pool_size: usize,
     #[serde(default = "default_max_concurrent_requests")]
     max_concurrent_requests: usize,
-    #[serde(default = "default_cache_version")]
-    cache_version: i32,
     #[serde(default = "default_cache_override_mode")]
     cache_override_mode: bool,
     #[serde(default = "default_api_headers")]
@@ -64,10 +62,6 @@ fn default_cache_miss_pool_size() -> usize {
 
 fn default_max_concurrent_requests() -> usize {
     100
-}
-
-fn default_cache_version() -> i32 {
-    0
 }
 
 fn default_cache_override_mode() -> bool {
@@ -231,7 +225,6 @@ async fn main() {
         api_endpoints: config.api_endpoints.clone(),
         max_concurrent_requests: config.max_concurrent_requests,
         semaphore: Arc::new(Semaphore::new(config.max_concurrent_requests)),
-        cache_version: config.cache_version,
         cache_override_mode: config.cache_override_mode,
         use_curl: config.use_curl,
         use_proxy: config.use_proxy,
