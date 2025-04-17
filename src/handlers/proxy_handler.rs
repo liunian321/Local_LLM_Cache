@@ -96,7 +96,6 @@ pub async fn send_proxied_request(
 
     println!("[{}] 开始发送请求...", request_id);
 
-    // 使用我们的超时辅助函数
     let response = with_timeout(
         Duration::from_secs(30),
         request_builder.body(payload_json.to_owned()).send(),
@@ -220,7 +219,7 @@ fn extract_choices_from_json(generic_json: &serde_json::Value) -> Vec<ChatChoice
     }
 }
 
-// 从通用JSON构造响应对象
+// 从JSON构造响应对象
 fn construct_response_from_json(
     generic_json: serde_json::Value,
     choices: Vec<ChatChoice>,

@@ -11,3 +11,6 @@ pub mod handlers {
     pub mod chat_completion_handler;
     pub mod proxy_handler;
 }
+
+pub mod utils;
+pub mod server;

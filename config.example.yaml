@@ -6,6 +6,13 @@ cache_miss_pool_size: 8
 max_concurrent_requests: 100
 cache_version: 0
 cache_override_mode: false
+# 缓存清理配置
+cache_maintenance:
+  enabled: true                # 是否启用缓存维护
+  interval_hours: 12           # 清理间隔时间（小时）
+  retention_days: 30           # 保留天数
+  cleanup_on_startup: false    # 启动时是否执行清理
+  min_hit_count: 5             # 最小命中次数（低于此值的无引用答案会被清理）
 api_endpoints:
   - url: "http://127.0.0.1:1234"
     weight: 1

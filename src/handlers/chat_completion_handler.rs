@@ -19,40 +19,50 @@ use uuid::Uuid;
 
 pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 
-// 缓存查询的异步函数 - 性能优化版本
+// 缓存查询的异步函数
 async fn query_cache(
     db: Arc<sqlx::SqlitePool>,
-    cache_key: String,
+    question_key: String,
     cache_version: u8,
     cache_override_mode: bool,
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
     println!("并行查询缓存");
 
-    // 使用更优化的查询策略：添加行锁提示和有限制结果
-    // 根据缓存覆盖模式选择查询方式
+    // 修改查询语句，同时获取 response 和 answer_key
     let result = if cache_override_mode {
-        sqlx::query_as::<_, (Vec<u8>,)>(
-            "SELECT response FROM cache WHERE key = ? AND version >= ? LIMIT 1",
+        sqlx::query_as::<_, (Vec<u8>, String)>(
+            "SELECT a.response, a.key 
+             FROM questions q 
+             JOIN answers a ON q.answer_key = a.key 
+             WHERE q.key = ? AND a.version >= ?
+             LIMIT 1",
         )
-        .bind(cache_key.clone())
+        .bind(question_key.clone())
         .bind(cache_version)
         .fetch_optional(&*db)
         .await?
     } else {
-        sqlx::query_as::<_, (Vec<u8>,)>("SELECT response FROM cache WHERE key = ? LIMIT 1")
-            .bind(cache_key.clone())
-            .fetch_optional(&*db)
-            .await?
+        sqlx::query_as::<_, (Vec<u8>, String)>(
+            "SELECT a.response, a.key 
+             FROM questions q 
+             JOIN answers a ON q.answer_key = a.key 
+             WHERE q.key = ?
+             LIMIT 1",
+        )
+        .bind(question_key.clone())
+        .fetch_optional(&*db)
+        .await?
     };
 
-    // 如果找到缓存项，更新命中计数，但不阻塞主流程
-    if result.is_some() {
-        let key_clone = cache_key.clone();
+    // 如果找到缓存项，更新答案表中的命中计数
+    if let Some((_, answer_key)) = &result {
         let db_clone = db.clone();
+        let answer_key_clone = answer_key.clone();
+
         tokio::spawn(async move {
-            // 使用原子更新来增加命中计数
-            match sqlx::query("UPDATE cache SET hit_count = hit_count + 1 WHERE key = ?")
-                .bind(key_clone)
+            // 更新命中次数
+            match sqlx::query("UPDATE answers SET hit_count = hit_count + 1 WHERE key = ?")
+                .bind(answer_key_clone)
                 .execute(&*db_clone)
                 .await
             {
@@ -64,7 +74,7 @@ async fn query_cache(
         });
     }
 
-    Ok(result.map(|(data,)| data))
+    Ok(result.map(|(data, _)| data))
 }
 
 // 处理解压缩缓存内容
@@ -372,7 +382,7 @@ pub async fn chat_completion(
         (state_ref.clone(), tx_hit_ref.clone(), tx_miss_ref.clone())
     };
 
-    // 提取用户消息并计算缓存键
+    // 提取用户消息并计算问题的哈希作为键
     let user_message = match payload
         .messages
         .iter()
@@ -387,7 +397,7 @@ pub async fn chat_completion(
 
     let mut hasher = Sha256::new();
     hasher.update(user_message.content.as_bytes());
-    let cache_key = hex::encode(hasher.finalize());
+    let question_key = hex::encode(hasher.finalize());
 
     // 选择API端点
     let selected_endpoint = if !state.api_endpoints.is_empty() {
@@ -412,7 +422,7 @@ pub async fn chat_completion(
     } else {
         query_cache(
             state.db.clone(),
-            cache_key.clone(),
+            question_key.clone(),
             selected_endpoint.version,
             state.cache_override_mode,
         )
@@ -540,7 +550,7 @@ pub async fn chat_completion(
                         tokio::spawn(async move {
                             cache_response(
                                 response_clone,
-                                cache_key,
+                                question_key,
                                 db_clone,
                                 selected_endpoint.version,
                             )
@@ -565,10 +575,10 @@ pub async fn chat_completion(
     }
 }
 
-// 缓存响应函数 - 优化版本
+// 缓存响应函数
 async fn cache_response(
     response_json: ChatResponseJson,
-    cache_key: String,
+    question_key: String,
     db: Arc<sqlx::SqlitePool>,
     cache_version: u8,
 ) {
@@ -610,23 +620,62 @@ async fn cache_response(
         return;
     }
 
-    // 使用带有数据替换冲突策略的事务
-    let tx_result = sqlx::query(
-        "INSERT OR REPLACE INTO cache (key, response, size, hit_count, version) VALUES (?, ?, ?, 0, ?)"
+    // 计算响应内容的哈希作为答案的 key
+    let mut hasher = Sha256::new();
+    hasher.update(message_bytes);
+    let answer_key = hex::encode(hasher.finalize());
+
+    // 使用事务确保数据一致性
+    let tx_result = db.begin().await;
+    if let Err(e) = tx_result {
+        eprintln!("开始数据库事务失败: {}", e);
+        return;
+    }
+
+    let mut tx = tx_result.unwrap();
+
+    // 1. 插入或更新答案表
+    let answer_result = sqlx::query(
+        "INSERT OR IGNORE INTO answers (key, response, size, hit_count, version) 
+         VALUES (?, ?, ?, 0, ?)",
     )
-    .bind(cache_key.clone())
-    .bind(compressed)
+    .bind(&answer_key)
+    .bind(&compressed)
     .bind(data_size)
     .bind(cache_version)
-    .execute(&*db)
+    .execute(&mut *tx)
     .await;
 
-    match tx_result {
-        Ok(_) => {
-            println!("成功缓存响应 Size: {}", data_size);
-        }
-        Err(e) => {
-            eprintln!("数据库缓存写入错误: {}", e);
-        }
+    if let Err(e) = answer_result {
+        eprintln!("插入答案记录失败: {}", e);
+        let _ = tx.rollback().await;
+        return;
     }
+
+    // 2. 插入或更新问题表
+    let question_result = sqlx::query(
+        "INSERT OR REPLACE INTO questions (key, answer_key) 
+         VALUES (?, ?)",
+    )
+    .bind(&question_key)
+    .bind(&answer_key)
+    .execute(&mut *tx)
+    .await;
+
+    if let Err(e) = question_result {
+        eprintln!("插入问题记录失败: {}", e);
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    // 提交事务
+    if let Err(e) = tx.commit().await {
+        eprintln!("提交事务失败: {}", e);
+        return;
+    }
+
+    println!(
+        "成功缓存响应 Size: {}, Answer Key: {}",
+        data_size, answer_key
+    );
 }
