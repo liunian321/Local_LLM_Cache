@@ -6,6 +6,16 @@ cache_miss_pool_size: 8
 max_concurrent_requests: 100
 cache_version: 0
 cache_override_mode: false
+# 缓存配置
+cache:
+  enabled: true               # 是否启用缓存功能
+  max_items: 100              # 内存缓存最大条目数量
+  batch_write_size: 20        # 批量写入数据库的数量
+# 空闲刷新配置
+idle_flush:
+  enabled: true               # 是否启用空闲刷新功能
+  idle_timeout_seconds: 300   # 空闲超时时间（秒）
+  check_interval_seconds: 10  # 检查间隔时间（秒）
 # 缓存清理配置
 cache_maintenance:
   enabled: true                # 是否启用缓存维护

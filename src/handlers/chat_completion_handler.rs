@@ -16,11 +16,39 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use crate::utils::db_writer::DbWriter;
 
 pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 
 // 缓存查询的异步函数
 async fn query_cache(
+    db: Arc<sqlx::SqlitePool>,
+    question_key: String,
+    cache_version: u8,
+    cache_override_mode: bool,
+    memory_cache: Option<&Arc<crate::utils::memory_cache::MemoryCache>>,
+    cache_enabled: bool,
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
+    // 如果内存缓存已禁用，直接查询数据库
+    if !cache_enabled {
+        return query_db_cache(db, question_key, cache_version, cache_override_mode).await;
+    }
+    
+    // 如果启用了内存缓存，先从内存中查找
+    if let Some(cache) = memory_cache {
+        if let Some(data) = cache.get(&question_key) {
+            println!("内存缓存命中");
+            return Ok(Some(data));
+        }
+    }
+    
+    // 内存缓存未命中，查询数据库
+    println!("内存缓存未命中，查询数据库");
+    query_db_cache(db, question_key, cache_version, cache_override_mode).await
+}
+
+// 数据库缓存查询函数
+async fn query_db_cache(
     db: Arc<sqlx::SqlitePool>,
     question_key: String,
     cache_version: u8,
@@ -425,6 +453,8 @@ pub async fn chat_completion(
             question_key.clone(),
             selected_endpoint.version,
             state.cache_override_mode,
+            state.memory_cache.as_ref(),
+            state.cache_enabled,
         )
         .await
     };
@@ -553,6 +583,9 @@ pub async fn chat_completion(
                                 question_key,
                                 db_clone,
                                 selected_endpoint.version,
+                                state.memory_cache.clone(),
+                                state.cache_enabled,
+                                state.batch_write_size,
                             )
                             .await;
                         });
@@ -581,6 +614,9 @@ async fn cache_response(
     question_key: String,
     db: Arc<sqlx::SqlitePool>,
     cache_version: u8,
+    memory_cache: Option<Arc<crate::utils::memory_cache::MemoryCache>>,
+    cache_enabled: bool,
+    batch_write_size: usize,
 ) {
     if response_json.choices.is_empty() {
         eprintln!("上游 API 返回的 choices 数组为空，跳过缓存");
@@ -623,59 +659,34 @@ async fn cache_response(
     // 计算响应内容的哈希作为答案的 key
     let mut hasher = Sha256::new();
     hasher.update(message_bytes);
-    let answer_key = hex::encode(hasher.finalize());
 
-    // 使用事务确保数据一致性
-    let tx_result = db.begin().await;
-    if let Err(e) = tx_result {
-        eprintln!("开始数据库事务失败: {}", e);
-        return;
+    // 如果启用了内存缓存，先添加到内存缓存
+    if cache_enabled {
+        if let Some(cache) = memory_cache {
+            // 将响应添加到内存缓存
+            tokio::spawn(async move {
+                cache.insert(question_key, compressed.clone()).await;
+                
+                // 如果待写入队列达到了批量写入阈值，执行批量写入
+                if cache.pending_count() >= batch_write_size {
+                    println!("内存缓存待写入队列达到阈值 ({})，执行批量写入", batch_write_size);
+                    let pending_items = cache.take_pending_writes(batch_write_size);
+                    
+                    // 创建数据库写入工具并执行批量写入
+                    let db_writer = DbWriter::new(db, cache_version);
+                    let (success, failed) = db_writer.batch_write(pending_items).await;
+                    println!("批量写入完成，成功: {}，失败: {}", success, failed);
+                }
+            });
+            return; // 已经添加到内存缓存，不需要继续执行
+        }
     }
 
-    let mut tx = tx_result.unwrap();
-
-    // 1. 插入或更新答案表
-    let answer_result = sqlx::query(
-        "INSERT OR IGNORE INTO answers (key, response, size, hit_count, version) 
-         VALUES (?, ?, ?, 0, ?)",
-    )
-    .bind(&answer_key)
-    .bind(&compressed)
-    .bind(data_size)
-    .bind(cache_version)
-    .execute(&mut *tx)
-    .await;
-
-    if let Err(e) = answer_result {
-        eprintln!("插入答案记录失败: {}", e);
-        let _ = tx.rollback().await;
-        return;
+    // 如果没有启用内存缓存，或内存缓存创建失败，直接写入数据库
+    let db_writer = DbWriter::new(db, cache_version);
+    if db_writer.write_single(question_key, compressed).await {
+        println!("成功写入单个响应到数据库");
+    } else {
+        eprintln!("写入单个响应到数据库失败");
     }
-
-    // 2. 插入或更新问题表
-    let question_result = sqlx::query(
-        "INSERT OR REPLACE INTO questions (key, answer_key) 
-         VALUES (?, ?)",
-    )
-    .bind(&question_key)
-    .bind(&answer_key)
-    .execute(&mut *tx)
-    .await;
-
-    if let Err(e) = question_result {
-        eprintln!("插入问题记录失败: {}", e);
-        let _ = tx.rollback().await;
-        return;
-    }
-
-    // 提交事务
-    if let Err(e) = tx.commit().await {
-        eprintln!("提交事务失败: {}", e);
-        return;
-    }
-
-    println!(
-        "成功缓存响应 Size: {}, Answer Key: {}",
-        data_size, answer_key
-    );
 }

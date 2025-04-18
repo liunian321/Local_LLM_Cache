@@ -1,47 +1,71 @@
+use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use llm_api::models::api_model::AppState;
-use llm_api::server::{create_router, create_task_channels, start_server};
-use llm_api::utils::cache_maintenance::start_maintenance_task;
+use llm_api::server::{create_router, start_server};
 use llm_api::utils::config::load_config;
 use llm_api::utils::db::{create_db_pool, init_db, optimize_db};
 use llm_api::utils::http_client::create_http_client;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
+use llm_api::utils::memory_cache::MemoryCache;
+use llm_api::utils::cache_maintenance::start_maintenance_task;
+use llm_api::utils::idle_flush::{IdleFlushConfig, IdleFlushManager};
 
 #[tokio::main]
 async fn main() {
     // 加载配置
-    let config = load_config().expect("无法加载配置");
-    
-    println!(
-        "服务配置: 数据库={}, 使用curl={}, 最大并发请求={}",
-        config.database_url, config.use_curl, config.max_concurrent_requests
-    );
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("加载配置失败: {}", e);
+            return;
+        }
+    };
 
+    // 创建数据库连接池
+    let pool = match create_db_pool(&config.database_url).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("创建数据库连接池失败: {}", e);
+            return;
+        }
+    };
+    
     // 初始化数据库
-    let pool = create_db_pool(&config.database_url)
-        .await
-        .expect("无法打开数据库");
-
-    init_db(&pool).await.expect("数据库初始化失败");
-    optimize_db(&pool).await.expect("数据库优化失败");
+    if let Err(e) = init_db(&pool).await {
+        eprintln!("初始化数据库失败: {}", e);
+        return;
+    }
     
-    // 启动缓存维护任务
-    let pool_arc = Arc::new(pool.clone());
-    start_maintenance_task(pool_arc, config.cache_maintenance.clone());
-    
-    // 创建任务处理通道和运行时
-    let (tx_hit, tx_miss, _hit_runtime, _miss_runtime) = create_task_channels(
-        config.cache_hit_pool_size,
-        config.cache_miss_pool_size,
-    );
+    // 优化数据库
+    if let Err(e) = optimize_db(&pool).await {
+        eprintln!("优化数据库失败: {}", e);
+        return;
+    }
 
-    println!("创建HTTP客户端...");
     // 创建HTTP客户端
-    let http_client = create_http_client().expect("无法创建HTTP客户端");
+    let http_client = match create_http_client() {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("创建HTTP客户端失败: {}", e);
+            return;
+        }
+    };
+
+    // 创建缓存命中和未命中的任务发送器
+    let (tx_hit, _) = mpsc::channel(config.cache_hit_pool_size);
+    let (tx_miss, _) = mpsc::channel(config.cache_miss_pool_size);
+
+    // 初始化内存缓存
+    let memory_cache = if config.cache.enabled {
+        println!("初始化内存缓存，最大容量: {} 条", config.cache.max_items);
+        Some(Arc::new(MemoryCache::new(config.cache.max_items)))
+    } else {
+        println!("内存缓存功能已禁用");
+        None
+    };
 
     // 创建应用状态
     let shared_state = Arc::new(AppState {
-        db: Arc::new(pool),
+        db: Arc::new(pool.clone()),
         client: http_client,
         api_endpoints: config.api_endpoints.clone(),
         max_concurrent_requests: config.max_concurrent_requests,
@@ -50,7 +74,33 @@ async fn main() {
         use_curl: config.use_curl,
         use_proxy: config.use_proxy,
         api_headers: config.api_headers,
+        memory_cache: memory_cache.clone(),
+        cache_enabled: config.cache.enabled,
+        batch_write_size: config.cache.batch_write_size,
     });
+
+    // 启动缓存维护任务
+    if config.cache_maintenance.enabled {
+        println!("启动缓存维护任务");
+        start_maintenance_task(
+            Arc::new(pool.clone()),
+            config.cache_maintenance.clone(),
+        );
+    }
+
+    // 启动空闲刷新任务
+    if config.idle_flush.enabled && memory_cache.is_some() {
+        println!("启动空闲刷新任务");
+        let idle_config = IdleFlushConfig::from_yaml_config(&config.idle_flush);
+        
+        let idle_manager = Arc::new(
+            IdleFlushManager::new(memory_cache.clone().unwrap(), idle_config)
+                .with_db(Arc::new(pool.clone()), 1) // 使用当前缓存版本
+        );
+        
+        idle_manager.clone().start_flush_task().await;
+        println!("空闲刷新任务已启动");
+    }
 
     let app_state = Arc::new((shared_state.clone(), tx_hit, tx_miss));
 

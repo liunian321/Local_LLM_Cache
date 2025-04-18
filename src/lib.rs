@@ -12,5 +12,13 @@ pub mod handlers {
     pub mod proxy_handler;
 }
 
-pub mod utils;
+pub mod utils {
+    pub mod cache_maintenance;
+    pub mod config;
+    pub mod db;
+    pub mod http_client;
+    pub mod memory_cache;
+    pub mod idle_flush;
+    pub mod db_writer;
+}
 pub mod server;

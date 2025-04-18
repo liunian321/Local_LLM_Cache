@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use std::time::{Duration, Instant};
 use std::sync::OnceLock;
 
-// 创建全局HTTP客户端：避免每次请求都创建新客户端
+// 全局HTTP客户端
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn get_optimized_client() -> &'static reqwest::Client {

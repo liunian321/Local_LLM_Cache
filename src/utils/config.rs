@@ -2,6 +2,40 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::utils::cache_maintenance::CacheMaintenanceConfig;
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub max_items: usize,
+    pub batch_write_size: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_items: 100,
+            batch_write_size: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IdleFlushConfig {
+    pub enabled: bool,
+    pub idle_timeout_seconds: u64,
+    pub check_interval_seconds: u64,
+}
+
+impl Default for IdleFlushConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_timeout_seconds: 300, // 默认5分钟
+            check_interval_seconds: 10, // 默认10秒检查一次
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_database_url")]
@@ -23,6 +57,10 @@ pub struct Config {
     pub api_headers: HashMap<String, String>,
     #[serde(default)]
     pub cache_maintenance: CacheMaintenanceConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
+    pub idle_flush: IdleFlushConfig,
 }
 
 pub fn default_database_url() -> String {

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use crate::utils::memory_cache::MemoryCache;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatRequestJson {
@@ -76,6 +77,9 @@ pub struct AppState {
     pub use_curl: bool,
     pub use_proxy: bool,
     pub api_headers: std::collections::HashMap<String, String>,
+    pub memory_cache: Option<Arc<MemoryCache>>,
+    pub cache_enabled: bool,
+    pub batch_write_size: usize,
 }
 
 fn default_system_fingerprint() -> String {
