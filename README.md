@@ -16,6 +16,7 @@
 10. **请求并发控制**：支持设置最大并发请求数，防止系统过载。
 11. **统计和监控**：提供缓存使用统计信息，包括复用率、命中率和内存使用情况。
 12. **双线程池系统**：独立的缓存命中和缓存未命中线程池，提升服务性能。
+13. **思考模式支持**：可配置是否启用模型的思考功能，便于控制模型响应行为。
 
 ## 如何使用
 
@@ -31,6 +32,7 @@
 - `CACHE_HIT_POOL_SIZE`: 缓存命中线程池大小，默认为 `8`
 - `MAX_CONCURRENT_REQUESTS`: 最大并发请求数，默认为 `100`
 - `USE_PROXY`: 是否使用系统代理，默认为 `true`
+- `ENABLE_THINKING`: 是否启用思考功能，可设置为 `true`、`false` 或不设置
 
 ### 配置文件
 
@@ -42,6 +44,7 @@ cache_version: 0
 cache_override_mode: true
 use_curl: false
 use_proxy: true
+enable_thinking: false # 是否启用思考功能，可设置为true、false或null
 cache_hit_pool_size: 8
 cache_miss_pool_size: 8
 max_concurrent_requests: 100
@@ -114,7 +117,8 @@ api_endpoints:
       ],
       "temperature": 0.1,
       "max_tokens": -1,
-      "stream": false
+      "stream": false,
+      "enable_thinking": false
     }
     ```
 
@@ -174,6 +178,13 @@ print(response.choices[0].message.content)
   - `http_client.rs`: HTTP客户端创建
   - `cache_maintenance.rs`: 缓存维护和统计功能
 
+### 参数说明
+
+- **enable_thinking**：控制是否启用模型的思考功能。
+  - 当设置为 `true` 时：模型会先思考再回答，通常生成更深入的回复。
+  - 当设置为 `false` 时：模型会直接回答，不进行额外思考过程。
+  - 当设置为 `null` 或不设置时：不向上游API传递此参数，使用上游API的默认行为。
+
 ---
 
 # LLM API Cache Service
@@ -194,6 +205,7 @@ This is a lightweight, high-concurrency LLM (Large Language Model) API cache ser
 10. **Request Concurrency Control**: Supports setting maximum concurrent request count to prevent system overload.
 11. **Statistics and Monitoring**: Provides cache usage statistics, including hit rate, hit count, and memory usage.
 12. **Dual Thread Pool System**: Separate cache hit and cache miss thread pools for improved service performance.
+13. **Thinking Mode Support**: Can configure whether to enable thinking functionality for models, to control model response behavior.
 
 ## How to Use
 
@@ -209,6 +221,7 @@ The following environment variables can be used to configure the service:
 - `CACHE_HIT_POOL_SIZE`: Size of the cache hit thread pool, defaults to `8`
 - `MAX_CONCURRENT_REQUESTS`: Maximum concurrent request count, defaults to `100`
 - `USE_PROXY`: Whether to use system proxy, defaults to `true`
+- `ENABLE_THINKING`: Whether to enable thinking functionality, can be set to `true`, `false`, or not set
 
 ### Configuration File
 
@@ -220,6 +233,7 @@ cache_version: 0
 cache_override_mode: true
 use_curl: false
 use_proxy: true
+enable_thinking: false # Whether to enable thinking functionality, can be set to true, false, or null
 cache_hit_pool_size: 8
 cache_miss_pool_size: 8
 max_concurrent_requests: 100
@@ -292,7 +306,8 @@ The `api_endpoints` configuration allows setting multiple upstream API endpoints
       ],
       "temperature": 0.1,
       "max_tokens": -1,
-      "stream": false
+      "stream": false,
+      "enable_thinking": false
     }
     ```
 
@@ -351,3 +366,10 @@ The service supports automatic cache maintenance functionality, which can be imp
   - `db.rs`: Database operation and management
   - `http_client.rs`: HTTP client creation
   - `cache_maintenance.rs`: Cache maintenance and statistics functionality
+
+### Parameter Description
+
+- **enable_thinking**: Controls whether to enable the thinking functionality of the model.
+  - When set to `true`: The model will think before answering, typically generating more in-depth replies.
+  - When set to `false`: The model will answer directly, without additional thinking process.
+  - When set to `null` or not set: This parameter will not be passed to the upstream API, using the default behavior of the upstream API.

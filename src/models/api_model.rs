@@ -16,6 +16,8 @@ pub struct ChatRequestJson {
     pub max_tokens: i32,
     #[serde(default = "default_stream")]
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -76,6 +78,7 @@ pub struct AppState {
     pub cache_override_mode: bool,
     pub use_curl: bool,
     pub use_proxy: bool,
+    pub enable_thinking: Option<bool>,
     pub api_headers: std::collections::HashMap<String, String>,
     pub memory_cache: Option<Arc<MemoryCache>>,
     pub cache_enabled: bool,

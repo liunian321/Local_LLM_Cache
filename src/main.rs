@@ -73,6 +73,7 @@ async fn main() {
         cache_override_mode: config.cache_override_mode,
         use_curl: config.use_curl,
         use_proxy: config.use_proxy,
+        enable_thinking: config.enable_thinking,
         api_headers: config.api_headers,
         memory_cache: memory_cache.clone(),
         cache_enabled: config.cache.enabled,

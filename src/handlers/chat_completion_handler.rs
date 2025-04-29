@@ -525,6 +525,11 @@ pub async fn chat_completion(
             if let Some(model) = selected_endpoint.model {
                 payload_clone.model = model;
             }
+            
+            // 如果配置了思考参数，则设置enable_thinking参数
+            if state.enable_thinking.is_some() {
+                payload_clone.enable_thinking = state.enable_thinking;
+            }
 
             // 序列化请求负载
             let payload_json = match serde_json::to_string(&payload_clone) {

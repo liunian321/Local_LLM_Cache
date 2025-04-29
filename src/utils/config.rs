@@ -45,6 +45,8 @@ pub struct Config {
     pub use_curl: bool,
     #[serde(default = "default_use_proxy")]
     pub use_proxy: bool,
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
     #[serde(default = "default_cache_hit_pool_size")]
     pub cache_hit_pool_size: usize,
     #[serde(default = "default_cache_miss_pool_size")]
