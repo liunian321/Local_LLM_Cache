@@ -85,8 +85,44 @@ api_endpoints:
    ```
 
 2. 安装依赖并编译项目：
+   
+   **安装 Rust 和 Cargo：**
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+   
+   **安装 Protocol Buffers 编译器 (protoc)：**
+   
+   **Windows:**
+   ```bash
+   # 使用 Winget
+   winget install Google.Protobuf
+   ```
+   
+   **macOS:**
+   ```bash
+   # 使用 Homebrew
+   brew install protobuf
+   ```
+   
+   **Linux (Ubuntu/Debian):**
+   ```bash
+   sudo apt update
+   sudo apt install protobuf-compiler
+   ```
+   
+   **Linux (CentOS/RHEL):**
+   ```bash
+   sudo yum install protobuf-compiler
+   ```
+   
+   **验证安装：**
+   ```bash
+   protoc --version
+   ```
+   
+   **编译项目：**
+   ```bash
    cargo build --release
    ```
 
@@ -172,6 +208,7 @@ print(response.choices[0].message.content)
 - `src/lib.rs`: 包含项目模块导出。
 - `src/handlers/`: 请求处理模块，包含聊天、模型获取和嵌入生成的处理逻辑。
 - `src/models/`: 数据模型定义。
+- `src/proto/`: Protocol Buffers 定义文件，包含API接口的数据结构定义。
 - `src/utils/`: 工具函数集合，包括：
   - `config.rs`: 配置加载和处理
   - `db.rs`: 数据库操作和管理
@@ -206,6 +243,7 @@ This is a lightweight, high-concurrency LLM (Large Language Model) API cache ser
 11. **Statistics and Monitoring**: Provides cache usage statistics, including hit rate, hit count, and memory usage.
 12. **Dual Thread Pool System**: Separate cache hit and cache miss thread pools for improved service performance.
 13. **Thinking Mode Support**: Can configure whether to enable thinking functionality for models, to control model response behavior.
+14. **Protocol Buffers Support**: Uses protobuf for data serialization and deserialization, providing efficient data transmission and storage.
 
 ## How to Use
 
@@ -274,8 +312,44 @@ The `api_endpoints` configuration allows setting multiple upstream API endpoints
    ```
 
 2. Install dependencies and compile the project:
+   
+   **Install Rust and Cargo:**
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+   
+   **Install Protocol Buffers compiler (protoc):**
+   
+   **Windows:**
+   ```bash
+   # Using Winget
+   winget install Google.Protobuf
+   ```
+   
+   **macOS:**
+   ```bash
+   # Using Homebrew
+   brew install protobuf
+   ```
+   
+   **Linux (Ubuntu/Debian):**
+   ```bash
+   sudo apt update
+   sudo apt install protobuf-compiler
+   ```
+   
+   **Linux (CentOS/RHEL):**
+   ```bash
+   sudo yum install protobuf-compiler
+   ```
+   
+   **Verify installation:**
+   ```bash
+   protoc --version
+   ```
+   
+   **Compile the project:**
+   ```bash
    cargo build --release
    ```
 
@@ -361,6 +435,7 @@ The service supports automatic cache maintenance functionality, which can be imp
 - `src/lib.rs`: Includes project module exports.
 - `src/handlers/`: Request processing module, including chat, model retrieval, and embedding generation processing logic.
 - `src/models/`: Data model definition.
+- `src/proto/`: Protocol Buffers definition files, containing API interface data structure definitions.
 - `src/utils/`: Tool function collection, including:
   - `config.rs`: Configuration loading and processing
   - `db.rs`: Database operation and management
