@@ -1,10 +1,10 @@
+use crate::utils::memory_cache::MemoryCache;
 use rand::prelude::*;
 use rand_distr::weighted::WeightedIndex;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use crate::utils::memory_cache::MemoryCache;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatRequestJson {
@@ -83,6 +83,8 @@ pub struct AppState {
     pub memory_cache: Option<Arc<MemoryCache>>,
     pub cache_enabled: bool,
     pub batch_write_size: usize,
+    pub context_trim_enabled: bool,
+    pub max_context_tokens: usize,
 }
 
 fn default_system_fingerprint() -> String {

@@ -1,5 +1,5 @@
-use sqlx::{Executor, SqlitePool};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Executor, SqlitePool};
 
 // 初始化数据库和表结构
 pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -48,31 +48,31 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // 如果存在旧的cache表，迁移数据到新表
     let exists_cache = sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache'"
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache'",
     )
     .fetch_optional(pool)
     .await?;
 
     if exists_cache.is_some() {
         println!("检测到旧的cache表，开始数据迁移...");
-        
+
         // 从cache表中复制数据到answers表和questions表
         sqlx::query(
             "INSERT OR IGNORE INTO answers (key, response, size, hit_count, version)
-             SELECT key, response, size, hit_count, version FROM cache"
+             SELECT key, response, size, hit_count, version FROM cache",
         )
         .execute(pool)
         .await?;
 
         sqlx::query(
             "INSERT OR IGNORE INTO questions (key, answer_key)
-             SELECT key, key FROM cache"
+             SELECT key, key FROM cache",
         )
         .execute(pool)
         .await?;
 
         println!("数据迁移完成");
-        
+
         // 重命名旧表而不是删除，以保留数据
         println!("重命名旧的cache表为cache_backup...");
         sqlx::query("ALTER TABLE cache RENAME TO cache_backup")
@@ -102,7 +102,7 @@ pub async fn optimize_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     for pragma in pragmas.iter() {
         match pool.execute(*pragma).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("设置SQLite参数失败 ({}): {}", pragma, e);
             }
@@ -134,4 +134,4 @@ pub async fn create_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Erro
                 .synchronous(sqlx::sqlite::SqliteSynchronous::Normal), // 降低同步级别
         )
         .await
-} 
+}

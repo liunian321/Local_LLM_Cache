@@ -1,15 +1,15 @@
+use crate::handlers::api_handler::{get_embeddings, get_models};
+use crate::handlers::chat_completion_handler::{TaskSender, chat_completion};
+use crate::models::api_model::AppState;
 use axum::Router;
 use axum::{
     Json,
     extract::State,
     routing::{get, post},
 };
-use crate::handlers::api_handler::{get_embeddings, get_models};
-use crate::handlers::chat_completion_handler::{TaskSender, chat_completion};
-use crate::models::api_model::AppState;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 // 创建路由配置
 pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) -> Router {
@@ -85,7 +85,12 @@ pub async fn start_server(app: Router) -> Result<(), Box<dyn std::error::Error>>
 pub fn create_task_channels(
     cache_hit_pool_size: usize,
     cache_miss_pool_size: usize,
-) -> (TaskSender, TaskSender, Arc<tokio::runtime::Runtime>, Arc<tokio::runtime::Runtime>) {
+) -> (
+    TaskSender,
+    TaskSender,
+    Arc<tokio::runtime::Runtime>,
+    Arc<tokio::runtime::Runtime>,
+) {
     // 创建专用线程池
     let hit_runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -136,4 +141,4 @@ pub fn create_task_channels(
     });
 
     (tx_hit, tx_miss, hit_runtime, miss_runtime)
-} 
+}

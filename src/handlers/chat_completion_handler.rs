@@ -4,6 +4,8 @@ use crate::models::api_model::{
     AppState, ChatChoice, ChatMessageJson, ChatRequestJson, ChatResponseJson, Usage,
     select_api_endpoint,
 };
+use crate::utils::context_trim::trim_context;
+use crate::utils::db_writer::DbWriter;
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -16,7 +18,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use crate::utils::db_writer::DbWriter;
 
 pub type TaskSender = tokio::sync::mpsc::Sender<BoxFuture<'static, ()>>;
 
@@ -33,7 +34,7 @@ async fn query_cache(
     if !cache_enabled {
         return query_db_cache(db, question_key, cache_version, cache_override_mode).await;
     }
-    
+
     // 如果启用了内存缓存，先从内存中查找
     if let Some(cache) = memory_cache {
         if let Some(data) = cache.get(&question_key) {
@@ -41,7 +42,7 @@ async fn query_cache(
             return Ok(Some(data));
         }
     }
-    
+
     // 内存缓存未命中，查询数据库
     println!("内存缓存未命中，查询数据库");
     query_db_cache(db, question_key, cache_version, cache_override_mode).await
@@ -521,11 +522,17 @@ pub async fn chat_completion(
             // 创建请求载荷的副本
             let mut payload_clone = payload.clone();
 
+            // 如果启用了上下文裁切，则对消息进行裁切
+            if state.context_trim_enabled {
+                payload_clone.messages =
+                    trim_context(&payload_clone.messages, state.max_context_tokens);
+            }
+
             // 如果端点配置了model，则使用端点配置的model
             if let Some(model) = selected_endpoint.model {
                 payload_clone.model = model;
             }
-            
+
             // 如果配置了思考参数，则设置enable_thinking参数
             if state.enable_thinking.is_some() {
                 payload_clone.enable_thinking = state.enable_thinking;
@@ -671,12 +678,15 @@ async fn cache_response(
             // 将响应添加到内存缓存
             tokio::spawn(async move {
                 cache.insert(question_key, compressed.clone()).await;
-                
+
                 // 如果待写入队列达到了批量写入阈值，执行批量写入
                 if cache.pending_count() >= batch_write_size {
-                    println!("内存缓存待写入队列达到阈值 ({})，执行批量写入", batch_write_size);
+                    println!(
+                        "内存缓存待写入队列达到阈值 ({})，执行批量写入",
+                        batch_write_size
+                    );
                     let pending_items = cache.take_pending_writes(batch_write_size);
-                    
+
                     // 创建数据库写入工具并执行批量写入
                     let db_writer = DbWriter::new(db, cache_version);
                     let (success, failed) = db_writer.batch_write(pending_items).await;

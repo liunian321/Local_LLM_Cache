@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use tokio::sync::{mpsc, Semaphore};
 use llm_api::models::api_model::AppState;
 use llm_api::server::{create_router, start_server};
+use llm_api::utils::cache_maintenance::start_maintenance_task;
 use llm_api::utils::config::load_config;
 use llm_api::utils::db::{create_db_pool, init_db, optimize_db};
 use llm_api::utils::http_client::create_http_client;
-use llm_api::utils::memory_cache::MemoryCache;
-use llm_api::utils::cache_maintenance::start_maintenance_task;
 use llm_api::utils::idle_flush::{IdleFlushConfig, IdleFlushManager};
+use llm_api::utils::memory_cache::MemoryCache;
+use std::sync::Arc;
+use tokio::sync::{Semaphore, mpsc};
 
 #[tokio::main]
 async fn main() {
@@ -28,13 +28,13 @@ async fn main() {
             return;
         }
     };
-    
+
     // 初始化数据库
     if let Err(e) = init_db(&pool).await {
         eprintln!("初始化数据库失败: {}", e);
         return;
     }
-    
+
     // 优化数据库
     if let Err(e) = optimize_db(&pool).await {
         eprintln!("优化数据库失败: {}", e);
@@ -55,7 +55,7 @@ async fn main() {
     let (tx_miss, _) = mpsc::channel(config.cache_miss_pool_size);
 
     // 初始化内存缓存
-    let memory_cache = if config.cache.enabled {
+    let memory_cache = if config.cache.enabled && config.cache.max_items > 0 {
         println!("初始化内存缓存，最大容量: {} 条", config.cache.max_items);
         Some(Arc::new(MemoryCache::new(config.cache.max_items)))
     } else {
@@ -78,27 +78,29 @@ async fn main() {
         memory_cache: memory_cache.clone(),
         cache_enabled: config.cache.enabled,
         batch_write_size: config.cache.batch_write_size,
+        context_trim_enabled: config.context_trim.enabled,
+        max_context_tokens: config.context_trim.max_context_tokens,
     });
 
     // 启动缓存维护任务
     if config.cache_maintenance.enabled {
         println!("启动缓存维护任务");
-        start_maintenance_task(
-            Arc::new(pool.clone()),
-            config.cache_maintenance.clone(),
-        );
+        start_maintenance_task(Arc::new(pool.clone()), config.cache_maintenance.clone());
     }
 
     // 启动空闲刷新任务
-    if config.idle_flush.enabled && memory_cache.is_some() {
+    if config.idle_flush.enabled
+        && memory_cache.is_some()
+        && config.idle_flush.idle_timeout_seconds > 0
+    {
         println!("启动空闲刷新任务");
         let idle_config = IdleFlushConfig::from_yaml_config(&config.idle_flush);
-        
+
         let idle_manager = Arc::new(
             IdleFlushManager::new(memory_cache.clone().unwrap(), idle_config)
-                .with_db(Arc::new(pool.clone()), 1) // 使用当前缓存版本
+                .with_db(Arc::new(pool.clone()), 1), // 使用当前缓存版本
         );
-        
+
         idle_manager.clone().start_flush_task().await;
         println!("空闲刷新任务已启动");
     }

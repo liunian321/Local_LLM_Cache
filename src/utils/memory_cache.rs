@@ -1,6 +1,6 @@
 use dashmap::DashMap;
-use tokio::sync::Mutex;
 use std::collections::VecDeque;
+use tokio::sync::Mutex;
 
 pub struct MemoryCache {
     cache: DashMap<String, Vec<u8>>,
@@ -34,7 +34,7 @@ impl MemoryCache {
 
         // 获取锁进行队列操作
         let mut queue = self.queue.lock().await;
-        
+
         // 如果达到容量上限，需要移除最早的项
         if queue.len() >= self.max_items {
             if let Some(oldest_key) = queue.pop_front() {
@@ -44,7 +44,7 @@ impl MemoryCache {
                 }
             }
         }
-        
+
         // 插入新项
         queue.push_back(key.clone());
         self.cache.insert(key, value);
@@ -54,13 +54,15 @@ impl MemoryCache {
     pub fn take_pending_writes(&self, batch_size: usize) -> Vec<(String, Vec<u8>)> {
         let mut result = Vec::with_capacity(batch_size);
         let mut count = 0;
-        
+
         // 获取并移除指定数量的待写入项
-        let pending_keys: Vec<String> = self.pending_writes.iter()
+        let pending_keys: Vec<String> = self
+            .pending_writes
+            .iter()
             .take(batch_size)
             .map(|entry| entry.key().clone())
             .collect();
-        
+
         for key in pending_keys {
             if let Some((k, v)) = self.pending_writes.remove(&key) {
                 result.push((k, v));
@@ -70,23 +72,21 @@ impl MemoryCache {
                 }
             }
         }
-        
+
         result
     }
 
     // 将所有缓存项移动到待写入状态并返回这些项
     pub async fn flush_all_to_pending(&self) -> Vec<(String, Vec<u8>)> {
         // 获取所有缓存键
-        let cache_keys: Vec<String> = self.cache.iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-        
+        let cache_keys: Vec<String> = self.cache.iter().map(|entry| entry.key().clone()).collect();
+
         let mut result = Vec::with_capacity(cache_keys.len());
-        
+
         // 清空队列
         let mut queue = self.queue.lock().await;
         queue.clear();
-        
+
         // 将所有缓存项移到待写入状态
         for key in cache_keys {
             if let Some((k, v)) = self.cache.remove(&key) {
@@ -94,7 +94,7 @@ impl MemoryCache {
                 result.push((k, v));
             }
         }
-        
+
         result
     }
 
@@ -107,4 +107,4 @@ impl MemoryCache {
     pub fn cache_count(&self) -> usize {
         self.cache.len()
     }
-} 
+}

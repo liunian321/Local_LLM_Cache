@@ -1,6 +1,6 @@
+use crate::utils::cache_maintenance::CacheMaintenanceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::utils::cache_maintenance::CacheMaintenanceConfig;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CacheConfig {
@@ -30,8 +30,23 @@ impl Default for IdleFlushConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            idle_timeout_seconds: 300, // 默认5分钟
+            idle_timeout_seconds: 300,  // 默认5分钟
             check_interval_seconds: 10, // 默认10秒检查一次
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextTrimConfig {
+    pub enabled: bool,
+    pub max_context_tokens: usize,
+}
+
+impl Default for ContextTrimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_context_tokens: 4096,
         }
     }
 }
@@ -63,6 +78,8 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub idle_flush: IdleFlushConfig,
+    #[serde(default)]
+    pub context_trim: ContextTrimConfig,
 }
 
 pub fn default_database_url() -> String {
@@ -101,11 +118,10 @@ pub fn default_api_headers() -> HashMap<String, String> {
 }
 
 pub fn load_config() -> Result<Config, String> {
-    let mut file = std::fs::File::open("config.yaml")
-        .map_err(|e| format!("无法打开配置文件: {}", e))?;
+    let mut file =
+        std::fs::File::open("config.yaml").map_err(|e| format!("无法打开配置文件: {}", e))?;
     let mut contents = String::new();
     std::io::Read::read_to_string(&mut file, &mut contents)
         .map_err(|e| format!("无法读取配置文件: {}", e))?;
-    serde_yaml::from_str(&contents)
-        .map_err(|e| format!("解析配置文件失败: {}", e))
-} 
+    serde_yaml::from_str(&contents).map_err(|e| format!("解析配置文件失败: {}", e))
+}

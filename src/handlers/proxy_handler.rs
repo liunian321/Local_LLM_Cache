@@ -1,7 +1,7 @@
 use crate::models::api_model::{ChatChoice, ChatMessageJson, ChatResponseJson, Usage};
 use axum::http::StatusCode;
-use std::time::{Duration, Instant};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 // 全局HTTP客户端
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -42,7 +42,7 @@ where
         Ok(Err(e)) => {
             // 将错误转换为字符串
             let err_msg = format!("{}", e);
-            
+
             // 根据错误类型返回不同状态码
             if err_msg.contains("connect") || err_msg.contains("connection") {
                 Err((
@@ -113,7 +113,8 @@ pub async fn send_proxied_request(
     // 检查响应状态
     if !response.status().is_success() {
         return Err((
-            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             format!("上游服务器返回错误: {:?}", response),
         ));
     }
@@ -177,29 +178,18 @@ fn extract_choices_from_json(generic_json: &serde_json::Value) -> Vec<ChatChoice
                     .iter()
                     .enumerate()
                     .map(|(idx, choice)| {
-                        let content = match choice
-                            .get("message")
-                            .and_then(|m| m.get("content"))
-                        {
-                            Some(content) => {
-                                content.as_str().unwrap_or("").to_string()
-                            }
+                        let content = match choice.get("message").and_then(|m| m.get("content")) {
+                            Some(content) => content.as_str().unwrap_or("").to_string(),
                             None => "".to_string(),
                         };
 
-                        let role =
-                            match choice.get("message").and_then(|m| m.get("role"))
-                            {
-                                Some(role) => {
-                                    role.as_str().unwrap_or("assistant").to_string()
-                                }
-                                None => "assistant".to_string(),
-                            };
+                        let role = match choice.get("message").and_then(|m| m.get("role")) {
+                            Some(role) => role.as_str().unwrap_or("assistant").to_string(),
+                            None => "assistant".to_string(),
+                        };
 
                         let finish_reason = match choice.get("finish_reason") {
-                            Some(reason) => {
-                                reason.as_str().unwrap_or("unknown").to_string()
-                            }
+                            Some(reason) => reason.as_str().unwrap_or("unknown").to_string(),
                             None => "unknown".to_string(),
                         };
 
