@@ -1,16 +1,17 @@
 use crate::models::api_model::{ChatChoice, ChatMessageJson, ChatResponseJson, Usage};
+use crate::utils::config::Config;
 use axum::http::StatusCode;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 
 // 全局HTTP客户端
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-fn get_optimized_client() -> &'static reqwest::Client {
+fn get_optimized_client(config: &Config) -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(config.proxy.request_timeout_seconds))
+            .connect_timeout(Duration::from_secs(config.proxy.connect_timeout_seconds))
             .danger_accept_invalid_certs(true)
             .pool_max_idle_per_host(20) // 增加连接池大小
             .tcp_keepalive(Some(Duration::from_secs(60)))
@@ -69,18 +70,15 @@ pub async fn send_proxied_request(
     target_url: &str,
     payload_json: &str,
     headers: &std::collections::HashMap<String, String>,
+    config: &Config,
+    request_id: &str,
 ) -> Result<ChatResponseJson, (StatusCode, String)> {
-    // 生成请求 ID，用于日志追踪
-    let request_id = uuid::Uuid::new_v4()
-        .to_string()
-        .chars()
-        .take(8)
-        .collect::<String>();
-
-    let start_time = Instant::now();
+    // 使用外部传入的请求 ID 进行日志追踪
+    // 开始时间日志已移除，不再记录耗时信息
+    println!("[{}] 代理请求开始: {}", request_id, target_url);
 
     // 使用优化的全局客户端
-    let optimized_client = get_optimized_client();
+    let optimized_client = get_optimized_client(config);
 
     // 创建请求构建器
     let mut request_builder = optimized_client.post(target_url);
@@ -94,21 +92,12 @@ pub async fn send_proxied_request(
         request_builder = request_builder.header("Content-Type", "application/json");
     }
 
-    println!("[{}] 开始发送请求...", request_id);
-
     let response = with_timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(config.proxy.request_timeout_seconds),
         request_builder.body(payload_json.to_owned()).send(),
         "连接上游服务器超时",
     )
     .await?;
-
-    println!(
-        "[{}] 成功收到响应: 状态码 = {} ({:?})",
-        request_id,
-        response.status(),
-        start_time.elapsed()
-    );
 
     // 检查响应状态
     if !response.status().is_success() {
@@ -119,41 +108,32 @@ pub async fn send_proxied_request(
         ));
     }
 
-    // 读取响应体
-    println!("[{}] 状态码正常，开始读取响应体...", request_id);
     let text = with_timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(config.proxy.response_read_timeout_seconds),
         response.text(),
         "读取上游服务器响应超时",
     )
     .await?;
 
-    println!("[{}] 成功获取响应体，长度: {} 字节", request_id, text.len());
-
     // 解析JSON
     match serde_json::from_str::<ChatResponseJson>(&text) {
         Ok(json) => Ok(json),
         Err(e) => {
-            println!(
-                "[{}] 解析JSON失败: {} ({:?})",
-                request_id,
-                e,
-                start_time.elapsed()
-            );
+            // println!("[{}] 解析JSON失败: {} ({:?})", request_id, e, start_time.elapsed());
 
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(generic_json) => {
-                    let choices = extract_choices_from_json(&generic_json);
+                    let choices = extract_choices_from_json(&generic_json, config);
 
                     if choices.is_empty() {
-                        println!("[{}] 无法从通用JSON中提取有效的消息内容", request_id);
+                        // println!("[{}] 无法从通用JSON中提取有效的消息内容", request_id);
                         return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             format!("解析响应JSON失败: {}", e),
                         ));
                     }
 
-                    let response = construct_response_from_json(generic_json, choices);
+                    let response = construct_response_from_json(generic_json, choices, config);
 
                     println!("[{}] 成功构造兼容的响应对象", request_id);
                     Ok(response)
@@ -170,7 +150,7 @@ pub async fn send_proxied_request(
     }
 }
 
-fn extract_choices_from_json(generic_json: &serde_json::Value) -> Vec<ChatChoice> {
+fn extract_choices_from_json(generic_json: &serde_json::Value, config: &Config) -> Vec<ChatChoice> {
     match generic_json.get("choices") {
         Some(choices) => {
             if let Some(choices_array) = choices.as_array() {
@@ -184,13 +164,13 @@ fn extract_choices_from_json(generic_json: &serde_json::Value) -> Vec<ChatChoice
                         };
 
                         let role = match choice.get("message").and_then(|m| m.get("role")) {
-                            Some(role) => role.as_str().unwrap_or("assistant").to_string(),
-                            None => "assistant".to_string(),
+                            Some(role) => role.as_str().unwrap_or(&config.api_defaults.default_role).to_string(),
+                            None => config.api_defaults.default_role.clone(),
                         };
 
                         let finish_reason = match choice.get("finish_reason") {
-                            Some(reason) => reason.as_str().unwrap_or("unknown").to_string(),
-                            None => "unknown".to_string(),
+                            Some(reason) => reason.as_str().unwrap_or(&config.api_defaults.default_finish_reason).to_string(),
+                            None => config.api_defaults.default_finish_reason.clone(),
                         };
 
                         ChatChoice {
@@ -213,17 +193,18 @@ fn extract_choices_from_json(generic_json: &serde_json::Value) -> Vec<ChatChoice
 fn construct_response_from_json(
     generic_json: serde_json::Value,
     choices: Vec<ChatChoice>,
+    config: &Config,
 ) -> ChatResponseJson {
     ChatResponseJson {
         id: generic_json
             .get("id")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
+            .unwrap_or(&config.api_defaults.default_system_fingerprint)
             .to_string(),
         object: generic_json
             .get("object")
             .and_then(|v| v.as_str())
-            .unwrap_or("chat.completion")
+            .unwrap_or(&config.api_defaults.default_object)
             .to_string(),
         created: generic_json
             .get("created")
@@ -232,7 +213,7 @@ fn construct_response_from_json(
         model: generic_json
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
+            .unwrap_or(&config.api_defaults.default_system_fingerprint)
             .to_string(),
         choices,
         usage: Usage {
@@ -256,7 +237,7 @@ fn construct_response_from_json(
         system_fingerprint: generic_json
             .get("system_fingerprint")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
+            .unwrap_or(&config.api_defaults.default_system_fingerprint)
             .to_string(),
     }
 }

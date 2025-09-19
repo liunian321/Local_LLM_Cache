@@ -21,7 +21,7 @@ async fn main() {
     };
 
     // 创建数据库连接池
-    let pool = match create_db_pool(&config.database_url).await {
+    let pool = match create_db_pool(&config.database_url, &config.database).await {
         Ok(pool) => pool,
         Err(e) => {
             eprintln!("创建数据库连接池失败: {}", e);
@@ -42,7 +42,7 @@ async fn main() {
     }
 
     // 创建HTTP客户端
-    let http_client = match create_http_client() {
+    let http_client = match create_http_client(&config.http_client) {
         Ok(client) => client,
         Err(e) => {
             eprintln!("创建HTTP客户端失败: {}", e);
@@ -64,6 +64,7 @@ async fn main() {
     };
 
     // 创建应用状态
+    let config_clone = config.clone();
     let shared_state = Arc::new(AppState {
         db: Arc::new(pool.clone()),
         client: http_client,
@@ -74,12 +75,25 @@ async fn main() {
         use_curl: config.use_curl,
         use_proxy: config.use_proxy,
         enable_thinking: config.enable_thinking,
-        api_headers: config.api_headers,
+        api_headers: config.api_headers.clone(),
         memory_cache: memory_cache.clone(),
         cache_enabled: config.cache.enabled,
         batch_write_size: config.cache.batch_write_size,
         context_trim_enabled: config.context_trim.enabled,
         max_context_tokens: config.context_trim.max_context_tokens,
+        context_trim_smart_enabled: config.context_trim.smart_enabled,
+        context_smart_max_tokens: config.context_trim.smart_max_tokens,
+        per_message_overhead: config.context_trim.per_message_overhead,
+        min_keep_pairs: config.context_trim.min_keep_pairs,
+        summary_aggressiveness: config.context_trim.summary_aggressiveness,
+        summary_mode: config.context_trim.summary_mode.clone(),
+        summary_api_enabled: config.context_trim.summary_api.enabled,
+        summary_api_endpoints: config.context_trim.summary_api.endpoints.clone(),
+        summary_api_key_env: config.context_trim.summary_api.api_key_env.clone(),
+        summary_api_max_tokens: config.context_trim.summary_api.max_tokens,
+        summary_api_temperature: config.context_trim.summary_api.temperature,
+        summary_api_timeout_seconds: config.context_trim.summary_api.timeout_seconds,
+        config: config_clone,
     });
 
     // 启动缓存维护任务
@@ -98,7 +112,7 @@ async fn main() {
 
         let idle_manager = Arc::new(
             IdleFlushManager::new(memory_cache.clone().unwrap(), idle_config)
-                .with_db(Arc::new(pool.clone()), 1), // 使用当前缓存版本
+                .with_db(Arc::new(pool.clone()), config.cache_version),
         );
 
         idle_manager.clone().start_flush_task().await;
@@ -111,7 +125,7 @@ async fn main() {
     let app = create_router(app_state);
 
     // 启动服务器
-    if let Err(e) = start_server(app).await {
+    if let Err(e) = start_server(app, &config).await {
         eprintln!("服务器启动失败: {}", e);
     }
 }

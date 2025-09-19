@@ -1,5 +1,6 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, SqlitePool};
+use crate::utils::config::DatabaseConfig;
 
 // 初始化数据库和表结构
 pub async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -119,12 +120,12 @@ pub async fn optimize_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 // 创建数据库连接池
-pub async fn create_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
+pub async fn create_db_pool(database_url: &str, config: &DatabaseConfig) -> Result<SqlitePool, sqlx::Error> {
     SqlitePoolOptions::new()
-        .max_connections(100)
-        .min_connections(10) // 增加最小连接数，降低连接启动开销
-        .max_lifetime(std::time::Duration::from_secs(1800)) // 连接最长生命周期30分钟
-        .idle_timeout(std::time::Duration::from_secs(600)) // 闲置超时10分钟
+        .max_connections(config.max_connections)
+        .min_connections(config.min_connections) // 增加最小连接数，降低连接启动开销
+        .max_lifetime(std::time::Duration::from_secs(config.max_lifetime_seconds)) // 连接最长生命周期30分钟
+        .idle_timeout(std::time::Duration::from_secs(config.idle_timeout_seconds)) // 闲置超时10分钟
         .connect_with(
             SqliteConnectOptions::new()
                 .filename(database_url)

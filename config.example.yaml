@@ -8,26 +8,79 @@ cache_version: 0
 cache_override_mode: false
 # 缓存配置
 cache:
-  enabled: true               # 是否启用缓存功能
-  max_items: 100              # 内存缓存最大条目数量
-  batch_write_size: 20        # 批量写入数据库的数量
+  enabled: true # 是否启用缓存功能
+  max_items: 100 # 内存缓存最大条目数量
+  batch_write_size: 20 # 批量写入数据库的数量
 # 空闲刷新配置
 idle_flush:
-  enabled: true               # 是否启用空闲刷新功能
-  idle_timeout_seconds: 300   # 空闲超时时间（秒）
-  check_interval_seconds: 10  # 检查间隔时间（秒）
+  enabled: true # 是否启用空闲刷新功能
+  idle_timeout_seconds: 300 # 空闲超时时间（秒）
+  check_interval_seconds: 10 # 检查间隔时间（秒）
 # 缓存清理配置
 cache_maintenance:
-  enabled: true                # 是否启用缓存维护
-  interval_hours: 12           # 清理间隔时间（小时）
-  retention_days: 30           # 保留天数
-  cleanup_on_startup: false    # 启动时是否执行清理
-  min_hit_count: 5             # 最小命中次数（低于此值的无引用答案会被清理）
+  enabled: true # 是否启用缓存维护
+  interval_hours: 12 # 清理间隔时间（小时）
+  retention_days: 30 # 保留天数
+  cleanup_on_startup: false # 启动时是否执行清理
+  min_hit_count: 5 # 最小命中次数（低于此值的无引用答案会被清理）
 
 # 上下文裁切配置
 context_trim:
-  enabled: false               # 是否启用上下文裁切功能
-  max_context_tokens: 4096     # 允许的最大上下文token数量，超过后会裁切
+  enabled: false
+  max_context_tokens: 4096
+  # 本地智能裁切（基于字符级摘要与规则）
+  smart_enabled: false
+  smart_max_tokens: 4096
+  per_message_overhead: 3 # 每条消息固定开销（tokens 估算中的常量）
+  min_keep_pairs: 1 # 至少保留多少个最近的 user/assistant 对
+  summary_aggressiveness: 1 # 摘要强度（越大越激进，值>=1）
+  # 摘要模式：local 使用内置字符级摘要；ai 使用远程 AI 服务进行语义摘要
+  summary_mode: "local" # local | ai
+
+  # 当 summary_mode 为 ai 时，启用并配置下列 summary_api 字段
+  summary_api:
+    enabled: false # 是否启用远程 AI 摘要（需要 summary_mode: "ai"）
+    endpoints: # 摘要专用的 API 端点列表，格式与 api_endpoints 一致
+      - url: "http://127.0.0.1:1234"
+        weight: 10
+        version: 0
+        model: "google/gemma-3n-e4b"
+    api_key_env: "SUMMARY_API_KEY" # 从环境变量读取 API Key，推荐不要明文写入配置
+    max_tokens: 1024 # 摘要返回的最大 tokens
+    temperature: 0.2 # 摘要生成的温度（如适用）
+    timeout_seconds: 10 # 请求摘要 API 的超时时间（秒）
+# 服务器配置
+server:
+  host: "0.0.0.0" # 服务器监听地址
+  port: 4321 # 服务器端口
+
+# HTTP客户端配置
+http_client:
+  timeout_seconds: 60 # HTTP请求超时时间
+  connect_timeout_seconds: 10 # 连接超时时间
+  tcp_keepalive_seconds: 60 # TCP保活时间
+  pool_idle_timeout_seconds: 180 # 连接池空闲超时
+  pool_max_idle_per_host: 50 # 每个主机最大空闲连接数
+  max_redirects: 5 # 最大重定向次数
+  http2_keep_alive_interval_seconds: 30 # HTTP/2保活间隔
+  http2_keep_alive_timeout_seconds: 30 # HTTP/2保活超时
+  http2_initial_stream_window_size: 1048576 # HTTP/2初始流窗口大小(1MB)
+
+# 数据库配置
+database:
+  max_connections: 100 # 最大连接数
+  min_connections: 10 # 最小连接数
+  max_lifetime_seconds: 1800 # 连接最大生命周期(30分钟)
+  idle_timeout_seconds: 600 # 空闲超时(10分钟)
+
+# API默认值配置
+api_defaults:
+  default_role: "assistant" # 默认角色
+  default_object: "chat.completion" # 默认对象类型
+  default_finish_reason: "unknown" # 默认完成原因
+  default_system_fingerprint: "unknown" # 默认系统指纹
+  cache_system_fingerprint: "cached" # 缓存系统指纹
+  cache_max_size_bytes: 5242880 # 缓存最大大小(5MB)
 
 api_endpoints:
   - url: "http://127.0.0.1:1234"

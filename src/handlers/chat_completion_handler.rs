@@ -4,8 +4,13 @@ use crate::models::api_model::{
     AppState, ChatChoice, ChatMessageJson, ChatRequestJson, ChatResponseJson, Usage,
     select_api_endpoint,
 };
-use crate::utils::context_trim::trim_context;
+use crate::utils::context_trim::{trim_context, trim_context_smart};
 use crate::utils::db_writer::DbWriter;
+use crate::utils::config::Config;
+// Local simple logger to ensure request_id is always printed without relying on external modules
+fn log_with_id(request_id: &str, message: &str) {
+    println!("[{}] {}", request_id, message);
+}
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -29,6 +34,7 @@ async fn query_cache(
     cache_override_mode: bool,
     memory_cache: Option<&Arc<crate::utils::memory_cache::MemoryCache>>,
     cache_enabled: bool,
+    request_id: &str,
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
     // 如果内存缓存已禁用，直接查询数据库
     if !cache_enabled {
@@ -38,13 +44,12 @@ async fn query_cache(
     // 如果启用了内存缓存，先从内存中查找
     if let Some(cache) = memory_cache {
         if let Some(data) = cache.get(&question_key) {
-            println!("内存缓存命中");
+            log_with_id(request_id, "内存缓存命中");
             return Ok(Some(data));
         }
     }
 
-    // 内存缓存未命中，查询数据库
-    println!("内存缓存未命中，查询数据库");
+    log_with_id(request_id, "内存缓存未命中，查询数据库");
     query_db_cache(db, question_key, cache_version, cache_override_mode).await
 }
 
@@ -55,9 +60,6 @@ async fn query_db_cache(
     cache_version: u8,
     cache_override_mode: bool,
 ) -> Result<Option<Vec<u8>>, sqlx::Error> {
-    println!("并行查询缓存");
-
-    // 修改查询语句，同时获取 response 和 answer_key
     let result = if cache_override_mode {
         sqlx::query_as::<_, (Vec<u8>, String)>(
             "SELECT a.response, a.key 
@@ -110,6 +112,8 @@ async fn query_db_cache(
 async fn process_cached_response(
     compressed_data: Vec<u8>,
     payload: ChatRequestJson,
+    request_id: &str,
+    config: &Config,
 ) -> Result<Json<ChatResponseJson>, (StatusCode, String)> {
     let mut decompressed = Vec::new();
     let mut decompressor =
@@ -120,7 +124,7 @@ async fn process_cached_response(
             Ok(message_content) => {
                 let response = ChatResponseJson {
                     id: Uuid::new_v4().to_string(),
-                    object: "chat.completion".to_string(),
+                    object: config.api_defaults.default_object.clone(),
                     created: chrono::Utc::now().timestamp(),
                     model: payload.model.clone(),
                     choices: vec![ChatChoice {
@@ -128,7 +132,7 @@ async fn process_cached_response(
                         logprobs: None,
                         finish_reason: "stop_from_cache".to_string(),
                         message: ChatMessageJson {
-                            role: "assistant".to_string(),
+                            role: config.api_defaults.default_role.clone(),
                             content: message_content,
                         },
                     }],
@@ -138,10 +142,10 @@ async fn process_cached_response(
                         total_tokens: 0,
                     },
                     stats: serde_json::Value::Null,
-                    system_fingerprint: "cached".to_string(),
+                    system_fingerprint: config.api_defaults.cache_system_fingerprint.clone(),
                 };
 
-                println!("缓存命中");
+                log_with_id(request_id, "缓存命中");
                 Ok(Json(response))
             }
             Err(e) => Err((
@@ -165,6 +169,7 @@ async fn send_api_request(
     use_curl: bool,
     use_proxy: bool,
     headers: &std::collections::HashMap<String, String>,
+    config: &crate::utils::config::Config,
 ) -> Result<ChatResponseJson, (StatusCode, String)> {
     // 记录信号量使用
     let _permit = permit;
@@ -178,10 +183,10 @@ async fn send_api_request(
     // 根据配置选择请求方式
     if use_curl {
         println!("[{}] 使用curl模式发送请求", request_id);
-        return send_request_with_curl(&target_url, &payload_json).await;
+        return send_request_with_curl(&target_url, &payload_json, config).await;
     } else if use_proxy {
         println!("[{}] 使用代理模式发送请求", request_id);
-        let result = send_proxied_request(&target_url, &payload_json, headers).await;
+        let result = send_proxied_request(&target_url, &payload_json, headers, config, &request_id).await;
         println!(
             "[{}] 代理请求已完成 ({:?})",
             request_id,
@@ -204,7 +209,7 @@ async fn send_api_request(
 
     // 发送请求
     let response = match tokio::time::timeout(
-        Duration::from_secs(60), // 增加超时时间
+        Duration::from_secs(config.proxy.request_timeout_seconds), // 增加超时时间
         request_builder.body(payload_json).send(),
     )
     .await
@@ -248,7 +253,7 @@ async fn send_api_request(
     }
 
     let text = match tokio::time::timeout(
-        Duration::from_secs(60), // 增加读取超时时间
+        Duration::from_secs(config.proxy.response_read_timeout_seconds), // 增加读取超时时间
         response.text(),
     )
     .await
@@ -297,16 +302,16 @@ async fn send_api_request(
                                             match choice.get("message").and_then(|m| m.get("role"))
                                             {
                                                 Some(role) => {
-                                                    role.as_str().unwrap_or("assistant").to_string()
+                                                    role.as_str().unwrap_or(&config.api_defaults.default_role).to_string()
                                                 }
-                                                None => "assistant".to_string(),
+                                                None => config.api_defaults.default_role.clone(),
                                             };
 
                                         let finish_reason = match choice.get("finish_reason") {
                                             Some(reason) => {
-                                                reason.as_str().unwrap_or("unknown").to_string()
+                                                reason.as_str().unwrap_or(&config.api_defaults.default_finish_reason).to_string()
                                             }
-                                            None => "unknown".to_string(),
+                                            None => config.api_defaults.default_finish_reason.clone(),
                                         };
 
                                         ChatChoice {
@@ -336,12 +341,12 @@ async fn send_api_request(
                         id: generic_json
                             .get("id")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                         object: generic_json
                             .get("object")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("chat.completion")
+                            .unwrap_or(&config.api_defaults.default_object)
                             .to_string(),
                         created: generic_json
                             .get("created")
@@ -350,7 +355,7 @@ async fn send_api_request(
                         model: generic_json
                             .get("model")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                         choices,
                         usage: Usage {
@@ -374,11 +379,10 @@ async fn send_api_request(
                         system_fingerprint: generic_json
                             .get("system_fingerprint")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                     };
 
-                    println!("[{}] 成功构造兼容的响应对象", request_id);
                     Ok(response)
                 }
                 Err(parse_err) => {
@@ -456,16 +460,28 @@ pub async fn chat_completion(
             state.cache_override_mode,
             state.memory_cache.as_ref(),
             state.cache_enabled,
+            &request_id,
         )
         .await
     };
 
     match cache_result {
         Ok(Some(compressed_data)) => {
-            println!("[{}] 缓存命中", request_id);
-            match process_cached_response(compressed_data, payload).await {
+            log_with_id(&request_id, "缓存命中");
+            match process_cached_response(compressed_data, payload, &request_id, &state.config).await {
                 Ok(json) => {
                     println!("[{}] 成功处理缓存响应", request_id);
+                    // 序列化后体哈希（仅日志诊断，不改变返回）
+                    if let Ok(body) = serde_json::to_string(&json.0) {
+                        let mut hasher = Sha256::new();
+                        hasher.update(body.as_bytes());
+                        let hash = hex::encode(hasher.finalize());
+                        println!(
+                            "[cache_hit_before_send] body.len={}, body.sha256={}",
+                            body.len(),
+                            &hash[..std::cmp::min(16, hash.len())]
+                        );
+                    }
                     json.into_response()
                 }
                 Err((status, message)) => {
@@ -478,7 +494,7 @@ pub async fn chat_completion(
             }
         }
         Ok(None) => {
-            println!("[{}] 缓存未命中. 将进行API请求", request_id);
+            log_with_id(&request_id, "缓存未命中. 进行API请求");
 
             // 获取信号量
             println!(
@@ -522,10 +538,50 @@ pub async fn chat_completion(
             // 创建请求载荷的副本
             let mut payload_clone = payload.clone();
 
-            // 如果启用了上下文裁切，则对消息进行裁切
+            // 如果启用了上下文裁切，则根据开关选择裁切模式
             if state.context_trim_enabled {
-                payload_clone.messages =
-                    trim_context(&payload_clone.messages, state.max_context_tokens);
+                println!("[{}] 上下文裁切已启用", request_id);
+                if state.context_trim_smart_enabled {
+                    println!(
+                        "[{}] 智能裁切已启用，模式: {}, API摘要: {}",
+                        request_id, state.summary_mode, state.summary_api_enabled
+                    );
+                    // 为摘要请求准备专用请求头（支持从环境变量注入摘要API Key）
+                    let mut summary_headers = state.api_headers.clone();
+                    if state.summary_api_enabled {
+                        if let Ok(k) = std::env::var(&state.summary_api_key_env) {
+                            // 若未显式提供授权头，则默认使用 Bearer 方案
+                            let has_auth = summary_headers
+                                .keys()
+                                .any(|h| h.eq_ignore_ascii_case("authorization"));
+                            if !has_auth && !k.is_empty() {
+                                summary_headers
+                                    .insert("Authorization".to_string(), format!("Bearer {}", k));
+                            }
+                        }
+                    }
+
+                    payload_clone.messages = trim_context_smart(
+                        &payload_clone.messages,
+                        state.context_smart_max_tokens,
+                        state.per_message_overhead,
+                        state.min_keep_pairs,
+                        state.summary_aggressiveness,
+                        &state.summary_mode,
+                        state.summary_api_enabled,
+                        &state.summary_api_endpoints,
+                        state.summary_api_max_tokens,
+                        state.summary_api_temperature,
+                        state.summary_api_timeout_seconds,
+                        &state.client,
+                        &state.api_endpoints,
+                        &summary_headers,
+                    )
+                    .await;
+                } else {
+                    payload_clone.messages =
+                        trim_context(&payload_clone.messages, state.max_context_tokens);
+                }
             }
 
             // 如果端点配置了model，则使用端点配置的model
@@ -579,6 +635,7 @@ pub async fn chat_completion(
                 state.use_curl,
                 state.use_proxy,
                 &client_headers,
+                &state.config,
             )
             .await;
 
@@ -598,11 +655,16 @@ pub async fn chat_completion(
                                 state.memory_cache.clone(),
                                 state.cache_enabled,
                                 state.batch_write_size,
+                                &state.config,
                             )
                             .await;
                         });
                     }
 
+                    if let Ok(body) = serde_json::to_string(response_json) {
+                        let mut hasher = Sha256::new();
+                        hasher.update(body.as_bytes());
+                    }
                     Json(response_json.clone()).into_response()
                 }
                 Err((status, msg)) => (status.clone(), msg.clone()).into_response(),
@@ -629,6 +691,7 @@ async fn cache_response(
     memory_cache: Option<Arc<crate::utils::memory_cache::MemoryCache>>,
     cache_enabled: bool,
     batch_write_size: usize,
+    config: &Config,
 ) {
     if response_json.choices.is_empty() {
         eprintln!("上游 API 返回的 choices 数组为空，跳过缓存");
@@ -657,7 +720,7 @@ async fn cache_response(
     }
 
     let data_size = compressed.len() as i64;
-    let cache_max_size = 5 * 1024 * 1024; // 5MB
+    let cache_max_size = config.api_defaults.cache_max_size_bytes as i64;
 
     // 如果压缩后大小超过限制，跳过缓存
     if data_size > cache_max_size {
@@ -700,8 +763,8 @@ async fn cache_response(
     // 如果没有启用内存缓存，或内存缓存创建失败，直接写入数据库
     let db_writer = DbWriter::new(db, cache_version);
     if db_writer.write_single(question_key, compressed).await {
-        println!("成功写入单个响应到数据库");
+        println!("成功写入响应到数据库");
     } else {
-        eprintln!("写入单个响应到数据库失败");
+        eprintln!("写入响应到数据库失败");
     }
 }

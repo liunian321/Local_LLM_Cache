@@ -20,7 +20,7 @@ pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) ->
             get(
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
                  headers: axum::http::HeaderMap| async move {
-                    get_models(State(state.0.0.clone()), headers).await
+                    get_models(State(state.0.0.clone()), headers, &state.0.0.config).await
                 },
             ),
         )
@@ -30,7 +30,7 @@ pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) ->
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
                  headers: axum::http::HeaderMap,
                  payload: Json<serde_json::Value>| async move {
-                    get_embeddings(State(state.0.0.clone()), headers, payload).await
+                    get_embeddings(State(state.0.0.clone()), headers, payload, &state.0.0.config).await
                 },
             ),
         );
@@ -42,7 +42,7 @@ pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) ->
             get(
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
                  headers: axum::http::HeaderMap| async move {
-                    get_models(State(state.0.0.clone()), headers).await
+                    get_models(State(state.0.0.clone()), headers, &state.0.0.config).await
                 },
             ),
         )
@@ -52,7 +52,7 @@ pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) ->
                 |state: State<Arc<(Arc<AppState>, TaskSender, TaskSender)>>,
                  headers: axum::http::HeaderMap,
                  payload: Json<serde_json::Value>| async move {
-                    get_embeddings(State(state.0.0.clone()), headers, payload).await
+                    get_embeddings(State(state.0.0.clone()), headers, payload, &state.0.0.config).await
                 },
             ),
         );
@@ -68,10 +68,11 @@ pub fn create_router(app_state: Arc<(Arc<AppState>, TaskSender, TaskSender)>) ->
 }
 
 // 启动服务器函数
-pub async fn start_server(app: Router) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_server(app: Router, config: &crate::utils::config::Config) -> Result<(), Box<dyn std::error::Error>> {
+    let bind_address = format!("{}:{}", config.server.host, config.server.port);
     println!("正在启动服务器...");
-    let listener = TcpListener::bind("0.0.0.0:4321").await?;
-    println!("服务器正在监听: 4321 端口, 请访问 http://127.0.0.1:4321/v1/chat/completions");
+    let listener = TcpListener::bind(&bind_address).await?;
+    println!("服务器正在监听: {} 端口, 请访问 http://127.0.0.1:{}/v1/chat/completions", config.server.port, config.server.port);
 
     let server = axum::serve(listener, app.into_make_service());
 

@@ -6,15 +6,17 @@ use axum::{
     http::StatusCode,
 };
 use std::sync::Arc;
+use crate::utils::config::Config;
 
 // 使用 curl 发送请求函数
 pub async fn send_request_with_curl(
     url: &str,
     payload: &str,
+    config: &Config,
 ) -> Result<ChatResponseJson, (StatusCode, String)> {
     // 使用较短的超时设置，避免长时间阻塞
     let curl_command = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(config.proxy.request_timeout_seconds),
         tokio::process::Command::new("curl")
             .arg("-sS") // 静默模式，但显示错误
             .arg("-X")
@@ -108,16 +110,16 @@ pub async fn send_request_with_curl(
                                             match choice.get("message").and_then(|m| m.get("role"))
                                             {
                                                 Some(role) => {
-                                                    role.as_str().unwrap_or("assistant").to_string()
+                                                    role.as_str().unwrap_or(&config.api_defaults.default_role).to_string()
                                                 }
-                                                None => "assistant".to_string(),
+                                                None => config.api_defaults.default_role.clone(),
                                             };
 
                                         let finish_reason = match choice.get("finish_reason") {
                                             Some(reason) => {
-                                                reason.as_str().unwrap_or("unknown").to_string()
+                                                reason.as_str().unwrap_or(&config.api_defaults.default_finish_reason).to_string()
                                             }
-                                            None => "unknown".to_string(),
+                                            None => config.api_defaults.default_finish_reason.clone(),
                                         };
 
                                         ChatChoice {
@@ -147,12 +149,12 @@ pub async fn send_request_with_curl(
                         id: generic_json
                             .get("id")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                         object: generic_json
                             .get("object")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("chat.completion")
+                            .unwrap_or(&config.api_defaults.default_object)
                             .to_string(),
                         created: generic_json
                             .get("created")
@@ -161,7 +163,7 @@ pub async fn send_request_with_curl(
                         model: generic_json
                             .get("model")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                         choices,
                         usage: Usage {
@@ -185,7 +187,7 @@ pub async fn send_request_with_curl(
                         system_fingerprint: generic_json
                             .get("system_fingerprint")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
+                            .unwrap_or(&config.api_defaults.default_system_fingerprint)
                             .to_string(),
                     };
 
@@ -207,6 +209,7 @@ pub async fn send_request_with_curl(
 pub async fn get_models(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    config: &Config,
 ) -> Result<String, (StatusCode, String)> {
     // 选择 API 端点
     let endpoint = match select_api_endpoint(&state.api_endpoints) {
@@ -227,8 +230,8 @@ pub async fn get_models(
 
     // 创建新的客户端，设置短超时
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(config.proxy.request_timeout_seconds))
+        .connect_timeout(std::time::Duration::from_secs(config.proxy.connect_timeout_seconds))
         .danger_accept_invalid_certs(true)
         .no_proxy()
         .build()
@@ -245,7 +248,7 @@ pub async fn get_models(
 
     // 使用 tokio timeout 包装请求
     let response =
-        match tokio::time::timeout(std::time::Duration::from_secs(10), req_builder.send()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(config.proxy.request_timeout_seconds), req_builder.send()).await {
             Ok(result) => match result {
                 Ok(res) => res,
                 Err(e) => {
@@ -287,7 +290,7 @@ pub async fn get_models(
 
     // 添加响应读取超时
     let response_text =
-        match tokio::time::timeout(std::time::Duration::from_secs(5), response.text()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(config.proxy.response_read_timeout_seconds), response.text()).await {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => {
                 return Err((
@@ -311,6 +314,7 @@ pub async fn get_embeddings(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<serde_json::Value>,
+    config: &Config,
 ) -> Result<String, (StatusCode, String)> {
     // 选择 API 端点
     let endpoint = match select_api_endpoint(&state.api_endpoints) {
@@ -331,8 +335,8 @@ pub async fn get_embeddings(
 
     // 创建新的客户端，设置短超时
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(config.proxy.request_timeout_seconds))
+        .connect_timeout(std::time::Duration::from_secs(config.proxy.connect_timeout_seconds))
         .danger_accept_invalid_certs(true)
         .no_proxy()
         .build()
@@ -349,7 +353,7 @@ pub async fn get_embeddings(
 
     // 使用 tokio timeout 包装请求
     let response = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(config.proxy.request_timeout_seconds),
         req_builder.json(&payload).send(),
     )
     .await
@@ -395,7 +399,7 @@ pub async fn get_embeddings(
 
     // 添加响应读取超时
     let response_text =
-        match tokio::time::timeout(std::time::Duration::from_secs(5), response.text()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(config.proxy.response_read_timeout_seconds), response.text()).await {
             Ok(Ok(text)) => text,
             Ok(Err(e)) => {
                 return Err((

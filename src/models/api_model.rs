@@ -85,6 +85,19 @@ pub struct AppState {
     pub batch_write_size: usize,
     pub context_trim_enabled: bool,
     pub max_context_tokens: usize,
+    pub context_trim_smart_enabled: bool,
+    pub context_smart_max_tokens: usize,
+    pub per_message_overhead: usize,
+    pub min_keep_pairs: usize,
+    pub summary_aggressiveness: usize,
+    pub summary_mode: String,
+    pub summary_api_enabled: bool,
+    pub summary_api_endpoints: Vec<ApiEndpoint>,
+    pub summary_api_key_env: String,
+    pub summary_api_max_tokens: i32,
+    pub summary_api_temperature: f32,
+    pub summary_api_timeout_seconds: u64,
+    pub config: crate::utils::config::Config,
 }
 
 fn default_system_fingerprint() -> String {
