@@ -2,36 +2,108 @@ use crate::models::api_model::select_api_endpoint;
 use crate::models::api_model::{ApiEndpoint, ChatMessageJson, ChatRequestJson, ChatResponseJson};
 use reqwest::Client;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use tokio::task;
 use uuid::Uuid;
 
-/// token计算函数
+// Token估算缓存
+static TOKEN_CACHE: OnceLock<std::sync::Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// 改进的token计算函数，支持缓存和更精确的估算
 pub fn estimate_tokens(message: &str) -> usize {
-    // 更稳健的启发式：基于字节长度近似 BPE token 数量，同时对多字节字符做少量加权，并加入每条消息固定开销。
-    // 经验值：平均每 token 约 4 字节（对英文）。使用 bytes_len / 4 作为基线，再加上 multi-byte 字符的轻微惩罚。
     if message.is_empty() {
         return 0;
     }
 
-    let bytes = message.as_bytes().len();
-    // 基线估算
-    let mut tokens = bytes / 4;
+    // 检查缓存
+    let cache = TOKEN_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.lock() {
+        if let Some(&cached_tokens) = cache_guard.get(message) {
+            return cached_tokens;
+        }
+    }
+
+    let tokens = estimate_tokens_internal(message);
+
+    // 更新缓存（限制缓存大小避免内存泄漏）
+    if let Ok(mut cache_guard) = cache.lock() {
+        if cache_guard.len() < 10000 {
+            // 限制缓存条目数
+            cache_guard.insert(message.to_string(), tokens);
+        }
+    }
+
+    tokens
+}
+
+/// 内部token估算实现
+fn estimate_tokens_internal(message: &str) -> usize {
+    let chars: Vec<char> = message.chars().collect();
+    let char_count = chars.len();
+
+    if char_count == 0 {
+        return 0;
+    }
+
+    // 基于字符类型的更精确估算
+    let mut tokens = 0usize;
+    let mut i = 0;
+
+    while i < char_count {
+        let ch = chars[i];
+
+        // ASCII字符：通常1个字符对应0.25-1个token
+        if ch.is_ascii() {
+            if ch.is_ascii_alphanumeric() {
+                // 字母数字：尝试识别单词边界
+                let word_start = i;
+                while i < char_count && chars[i].is_ascii_alphanumeric() {
+                    i += 1;
+                }
+                let word_len = i - word_start;
+                // 英文单词平均1.3个token，短单词可能是1个token
+                tokens += if word_len <= 3 {
+                    1
+                } else {
+                    (word_len as f32 * 0.75).ceil() as usize
+                };
+            } else {
+                // 标点符号和空格：通常1个字符1个token
+                tokens += 1;
+                i += 1;
+            }
+        }
+        // CJK字符：通常1个字符对应1-2个token
+        else if is_cjk_char(ch) {
+            tokens += 2; // CJK字符通常占用更多token
+            i += 1;
+        }
+        // 其他Unicode字符（包括emoji）
+        else {
+            tokens += if ch.len_utf8() > 2 { 3 } else { 2 };
+            i += 1;
+        }
+    }
+
+    // 确保最小值
     if tokens == 0 {
         tokens = 1;
     }
 
-    // 对多字节字符做小幅度加权（CJK/emoji等通常占更多 token）
-    let mut multi_count = 0usize;
-    for b in message.as_bytes() {
-        if *b >= 0x80 {
-            multi_count += 1;
-        }
-    }
-    // 每 8 个 multi-byte 字节额外加 1 token（经验值）
-    tokens += multi_count / 8;
-
-    // 每条消息增加固定开销，模拟消息元信息（role/format 等）。默认值为3，但可由配置覆盖（如果外部需要）。
+    // 消息固定开销（role、格式等）
     tokens + 3
+}
+
+/// 判断是否为CJK字符
+fn is_cjk_char(ch: char) -> bool {
+    let code = ch as u32;
+    // 中文、日文、韩文的主要Unicode范围
+    (0x4E00..=0x9FFF).contains(&code) ||  // CJK统一汉字
+    (0x3400..=0x4DBF).contains(&code) ||  // CJK扩展A
+    (0x20000..=0x2A6DF).contains(&code) || // CJK扩展B
+    (0x3040..=0x309F).contains(&code) ||  // 平假名
+    (0x30A0..=0x30FF).contains(&code) ||  // 片假名
+    (0xAC00..=0xD7AF).contains(&code) // 韩文音节
 }
 
 /// 计算消息列表的总token数量
@@ -47,12 +119,204 @@ pub fn calculate_total_tokens(messages: &[ChatMessageJson]) -> usize {
         .sum()
 }
 
-/// 简单摘要辅助
+/// 改进的摘要函数，按语义边界截断
 fn summarize_content(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();
     }
-    content.chars().take(max_chars).collect::<String>() + "…"
+
+    // 尝试按句子边界截断
+    let sentences = split_into_sentences(content);
+    let mut result = String::new();
+    let mut current_len = 0;
+
+    for sentence in sentences {
+        let sentence_len = sentence.chars().count();
+        if current_len + sentence_len <= max_chars {
+            result.push_str(sentence);
+            current_len += sentence_len;
+        } else {
+            // 如果当前句子太长，尝试按词截断
+            if result.is_empty() {
+                result = truncate_by_words(sentence, max_chars);
+            }
+            break;
+        }
+    }
+
+    // 如果结果为空或太短，回退到字符截断
+    if result.is_empty() || result.chars().count() < max_chars / 2 {
+        result = content
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+    }
+
+    if result.len() < content.len() {
+        result.push('…');
+    }
+
+    result
+}
+
+/// 将文本分割为句子
+fn split_into_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let chars: Vec<char> = text.chars().collect();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        // 句子结束标记
+        if matches!(ch, '.' | '!' | '?' | '。' | '！' | '？' | '\n') {
+            // 检查是否是真正的句子结束（避免缩写等误判）
+            let is_sentence_end = if ch == '.' {
+                // 简单的缩写检测
+                i + 1 >= chars.len()
+                    || chars[i + 1].is_whitespace()
+                    || (i + 1 < chars.len() && chars[i + 1].is_uppercase())
+            } else {
+                true
+            };
+
+            if is_sentence_end {
+                let sentence = &text[start..=text.char_indices().nth(i).unwrap().0];
+                sentences.push(sentence.trim());
+                start = text
+                    .char_indices()
+                    .nth(i + 1)
+                    .map(|(pos, _)| pos)
+                    .unwrap_or(text.len());
+            }
+        }
+    }
+
+    // 添加剩余部分
+    if start < text.len() {
+        sentences.push(&text[start..].trim());
+    }
+
+    sentences.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+/// 按词截断文本
+fn truncate_by_words(text: &str, max_chars: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut result = String::new();
+
+    for word in words {
+        if result.chars().count() + word.chars().count() + 1 <= max_chars {
+            if !result.is_empty() {
+                result.push(' ');
+            }
+            result.push_str(word);
+        } else {
+            break;
+        }
+    }
+
+    result
+}
+
+/// 计算消息重要性分数
+fn calculate_message_importance(
+    message: &ChatMessageJson,
+    idx: usize,
+    total_messages: usize,
+    pairs: &[(usize, Option<usize>)],
+) -> f32 {
+    let mut score = 0.0f32;
+
+    // 1. 时间新近性分数 (0.0-1.0)
+    let recency_score = (total_messages - idx) as f32 / total_messages as f32;
+    score += recency_score * 0.4;
+
+    // 2. 角色重要性
+    let role_score = match message.role.to_lowercase().as_str() {
+        "system" | "prompt" => 1.0, // 系统消息最重要
+        "user" => 0.8,              // 用户消息较重要
+        "assistant" => 0.6,         // AI回复中等重要
+        _ => 0.4,                   // 其他角色较低重要性
+    };
+    score += role_score * 0.3;
+
+    // 3. 内容长度影响（适中长度更重要）
+    let content_len = message.content.len();
+    let length_score = if content_len < 50 {
+        0.3 // 太短可能不重要
+    } else if content_len < 500 {
+        1.0 // 适中长度
+    } else if content_len < 2000 {
+        0.8 // 较长但仍有价值
+    } else {
+        0.6 // 过长可能冗余
+    };
+    score += length_score * 0.2;
+
+    // 4. 对话完整性（是否为完整对话对的一部分）
+    let is_in_pair = pairs.iter().any(|(user_idx, assistant_idx)| {
+        *user_idx == idx || assistant_idx.map_or(false, |a_idx| a_idx == idx)
+    });
+    if is_in_pair {
+        score += 0.1;
+    }
+
+    // 确保分数在合理范围内
+    score.clamp(0.0, 1.0)
+}
+
+/// 基于重要性和内容类型计算摘要长度
+fn calculate_summary_length(
+    content_length: usize,
+    importance_score: f32,
+    aggressiveness: usize,
+    role: &str,
+) -> usize {
+    // 基础保留比例（重要性越高保留越多）
+    let base_ratio = 0.2 + (importance_score * 0.6); // 20%-80%
+
+    // 根据激进程度调整
+    let aggressiveness_factor = 1.0 - (aggressiveness as f32 * 0.1).min(0.7);
+    let adjusted_ratio = base_ratio * aggressiveness_factor;
+
+    // 角色特定调整
+    let role_multiplier = match role.to_lowercase().as_str() {
+        "system" | "prompt" => 1.5, // 系统消息保留更多
+        "user" => 1.2,              // 用户消息稍多保留
+        "assistant" => 1.0,         // AI回复正常处理
+        _ => 0.8,                   // 其他角色保留较少
+    };
+
+    let target_length = (content_length as f32 * adjusted_ratio * role_multiplier) as usize;
+
+    // 设置合理的边界
+    let min_length = if content_length < 100 { 15 } else { 30 };
+    let max_length = if importance_score > 0.7 { 500 } else { 300 };
+
+    target_length.clamp(min_length, max_length)
+}
+
+/// 清理token估算缓存（用于内存管理）
+pub fn clear_token_cache() {
+    if let Some(cache) = TOKEN_CACHE.get() {
+        if let Ok(mut cache_guard) = cache.lock() {
+            cache_guard.clear();
+        }
+    }
+}
+
+/// 获取token缓存统计信息
+pub fn get_token_cache_stats() -> (usize, usize) {
+    if let Some(cache) = TOKEN_CACHE.get() {
+        if let Ok(cache_guard) = cache.lock() {
+            let size = cache_guard.len();
+            let memory_usage = cache_guard
+                .iter()
+                .map(|(k, _)| k.len() + std::mem::size_of::<usize>())
+                .sum::<usize>();
+            return (size, memory_usage);
+        }
+    }
+    (0, 0)
 }
 
 /// 使用AI端点对单个消息进行摘要
@@ -202,12 +466,25 @@ async fn summarize_messages_concurrent(
         })
         .collect();
 
-    // 等待所有任务完成
+    // 等待所有任务完成，改进错误处理
     let mut results = Vec::with_capacity(tasks.len());
+    let mut failed_count = 0;
+
     for task in tasks {
-        if let Ok(result) = task.await {
-            results.push(result);
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(_) => {
+                failed_count += 1;
+                // 任务失败时记录但继续处理其他任务
+            }
         }
+    }
+
+    if failed_count > 0 {
+        println!(
+            "[WARNING] {} AI摘要任务失败，已回退到本地摘要",
+            failed_count
+        );
     }
 
     // 按原始索引排序
@@ -223,16 +500,25 @@ pub fn trim_context(messages: &[ChatMessageJson], max_tokens: usize) -> Vec<Chat
     let request_id: String = Uuid::new_v4().to_string().chars().take(8).collect();
 
     let total_tokens = calculate_total_tokens(messages);
-    println!("[request_id:{}] trim_context: total_tokens={}", request_id, total_tokens);
+    println!(
+        "[request_id:{}] trim_context: total_tokens={}",
+        request_id, total_tokens
+    );
 
     if total_tokens <= max_tokens {
-        println!("[request_id:{}] trim_context: early return (total_tokens <= max_tokens)", request_id);
+        println!(
+            "[request_id:{}] trim_context: early return (total_tokens <= max_tokens)",
+            request_id
+        );
         return messages.to_vec();
     }
 
     // 如果历史记录为空但还是超了配置项，则允许本次请求发送
     if messages.len() <= 2 {
-        println!("[request_id:{}] trim_context: history length <= 2, returning as-is", request_id);
+        println!(
+            "[request_id:{}] trim_context: history length <= 2, returning as-is",
+            request_id
+        );
         return messages.to_vec();
     }
 
@@ -357,15 +643,23 @@ pub fn trim_context(messages: &[ChatMessageJson], max_tokens: usize) -> Vec<Chat
 
     if result.len() < 2 {
         let start = if n >= 2 { n - 2 } else { 0 };
-        println!("[request_id:{}] trim_context: final_result_len=0, returning last {} messages", request_id, n - start);
+        println!(
+            "[request_id:{}] trim_context: final_result_len=0, returning last {} messages",
+            request_id,
+            n - start
+        );
         return messages[start..].to_vec();
     }
 
-    println!("[request_id:{}] trim_context: final_result_len={}", request_id, result.len());
+    println!(
+        "[request_id:{}] trim_context: final_result_len={}",
+        request_id,
+        result.len()
+    );
     result
 }
 
-/// 智能裁切：在保持所有对话的前提下，对非保留的对话进行摘要处理，以压缩内容。
+/// 智能裁切：在保持对话完整性的前提下，智能选择需要摘要的消息，优化上下文压缩效果。
 pub async fn trim_context_smart(
     messages: &[ChatMessageJson],
     max_tokens: usize,
@@ -381,81 +675,138 @@ pub async fn trim_context_smart(
     client: &Client,
     api_endpoints: &[ApiEndpoint],
     api_headers: &HashMap<String, String>,
- ) -> Vec<ChatMessageJson> {
+) -> Vec<ChatMessageJson> {
     if messages.is_empty() {
         return Vec::new();
     }
     let request_id: String = Uuid::new_v4().to_string().chars().take(8).collect();
-    println!("[request_id:{}] trim_context_smart: start, n={}", request_id, messages.len());
-
-    // 避免未使用参数的编译告警（保留签名以兼容调用方）
-    let _ = min_keep_pairs;
+    println!(
+        "[request_id:{}] trim_context_smart: start, n={}",
+        request_id,
+        messages.len()
+    );
 
     let n = messages.len();
+    let mut output = messages.to_vec();
 
-    // 构建 user->assistant 对列表
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    // 计算每条消息的初始 token 数
+    let mut token_cache: Vec<usize> = messages
+        .iter()
+        .map(|m| estimate_tokens(&m.content) + per_message_overhead)
+        .collect();
+
+    let total_tokens: usize = token_cache.iter().sum();
+    println!(
+        "[request_id:{}] 初始总token数: {}, 目标限制: {}",
+        request_id, total_tokens, max_tokens
+    );
+
+    // 如果已经在限制内，直接返回
+    if total_tokens <= max_tokens {
+        println!("[request_id:{}] token数已在限制内，无需裁切", request_id);
+        return output;
+    }
+
+    // 构建 user->assistant 对话对列表
+    let mut pairs: Vec<(usize, Option<usize>)> = Vec::new(); // (user_idx, assistant_idx)
     let mut i = 0usize;
     while i < n {
         if messages[i].role.eq_ignore_ascii_case("user") {
+            let mut assistant_idx = None;
             let mut j = i + 1;
-            while j < n {
+            while j < n && messages[j].role.eq_ignore_ascii_case("user") == false {
                 if messages[j].role.eq_ignore_ascii_case("assistant") {
-                    pairs.push((i, j));
+                    assistant_idx = Some(j);
                     break;
                 }
                 j += 1;
             }
-            i = j;
+            pairs.push((i, assistant_idx));
+            i = if assistant_idx.is_some() {
+                j + 1
+            } else {
+                i + 1
+            };
         } else {
             i += 1;
         }
     }
 
-    // 使用摘要压缩未保留消息的内容
-    let mut output = messages.to_vec();
-    // 计算每条消息的 token 估算并加入 per_message_overhead
-    let mut token_cache: Vec<usize> = messages
-        .iter()
-        .map(|m| estimate_tokens(&m.content) + per_message_overhead)
-        .collect();
-    let mut current_tokens = 0usize;
-    // 所有消息均进行摘要
-    let mut messages_to_summarize = Vec::with_capacity(n);
-    let aggr = if summary_aggressiveness == 0 {
-        1
-    } else {
-        summary_aggressiveness
-    } as usize;
+    println!("[request_id:{}] 发现 {} 个对话对", request_id, pairs.len());
 
-    for idx in 0..n {
-        // 跳过 system 消息摘要，避免改写系统提示导致语言/风格漂移
-        if messages[idx].role.eq_ignore_ascii_case("system") {
-            continue;
+    // 标记需要保护的消息（不进行摘要）
+    let mut protected = vec![false; n];
+
+    // 1. 保护所有 system 消息
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role.eq_ignore_ascii_case("system") || msg.role.eq_ignore_ascii_case("prompt") {
+            protected[i] = true;
         }
-        let distance = n - idx; // 越早越大
-        let base = if max_tokens > 0 { max_tokens / 8 } else { 32 };
-        let mut approx_chars = base / aggr;
-        approx_chars = std::cmp::min(
-            256,
-            std::cmp::max(8, approx_chars / std::cmp::max(1, distance)),
-        );
-        messages_to_summarize.push((idx, output[idx].content.clone(), approx_chars));
     }
 
-    // 使用并发摘要处理所有需要摘要的消息
+    // 2. 保护最后几轮对话（根据 min_keep_pairs 参数）
+    let keep_pairs = std::cmp::max(1, min_keep_pairs);
+    let pairs_to_protect = std::cmp::min(keep_pairs, pairs.len());
+    for i in (pairs.len().saturating_sub(pairs_to_protect))..pairs.len() {
+        let (user_idx, assistant_idx) = pairs[i];
+        protected[user_idx] = true;
+        if let Some(assistant_idx) = assistant_idx {
+            protected[assistant_idx] = true;
+        }
+    }
+
+    // 3. 保护最后一条消息（通常是当前用户输入）
+    if n > 0 {
+        protected[n - 1] = true;
+    }
+
+    // 计算需要摘要的消息，使用改进的重要性评分
+    let mut messages_to_summarize = Vec::new();
+    let mut protected_tokens = 0usize;
+
+    for (idx, &is_protected) in protected.iter().enumerate() {
+        if is_protected {
+            protected_tokens += token_cache[idx];
+        } else {
+            let importance_score = calculate_message_importance(&messages[idx], idx, n, &pairs);
+            let content_length = messages[idx].content.len();
+
+            // 基于重要性和内容类型计算摘要长度
+            let base_length = calculate_summary_length(
+                content_length,
+                importance_score,
+                summary_aggressiveness,
+                &messages[idx].role,
+            );
+
+            messages_to_summarize.push((idx, messages[idx].content.clone(), base_length));
+        }
+    }
+
+    println!(
+        "[request_id:{}] 保护消息token: {}, 需摘要消息: {}",
+        request_id,
+        protected_tokens,
+        messages_to_summarize.len()
+    );
+
+    // 执行摘要处理
     if !messages_to_summarize.is_empty() {
         let summary_inputs: Vec<(usize, String)> = messages_to_summarize
-            .into_iter()
-            .map(|(idx, content, _)| (idx, content))
+            .iter()
+            .map(|(idx, content, _)| (*idx, content.clone()))
             .collect();
 
-        // 使用固定平均字符数作为摘要长度（所有消息同一目标）
-        let avg_chars = if !summary_inputs.is_empty() { 64 } else { 64 };
+        // 计算平均摘要长度
+        let avg_summary_length = messages_to_summarize
+            .iter()
+            .map(|(_, _, len)| *len)
+            .sum::<usize>()
+            / messages_to_summarize.len();
 
         let summary_results = summarize_messages_concurrent(
             summary_inputs,
-            avg_chars,
+            avg_summary_length,
             client,
             api_endpoints,
             api_headers,
@@ -470,54 +821,93 @@ pub async fn trim_context_smart(
 
         // 应用摘要结果
         for (idx, summarized_content) in summary_results {
-            output[idx].content = summarized_content;
-            token_cache[idx] = estimate_tokens(&output[idx].content) + per_message_overhead;
+            if !protected[idx] {
+                output[idx].content = summarized_content;
+                token_cache[idx] = estimate_tokens(&output[idx].content) + per_message_overhead;
+            }
         }
-
-        // 重新计算总token数
-        current_tokens = token_cache.iter().sum();
-        println!("[request_id:{}] trim_context_smart: 摘要后总token: {}", request_id, current_tokens);
     }
 
-    // 如果仍然超限，按从最早到最新对所有消息做更激进压缩直至符合
+    // 重新计算总token数
+    let current_tokens: usize = token_cache.iter().sum();
+    println!(
+        "[request_id:{}] 摘要后总token: {}",
+        request_id, current_tokens
+    );
+
+    // 如果仍然超限，进行渐进式压缩
     if current_tokens > max_tokens {
+        println!("[request_id:{}] 仍超限，进行渐进式压缩", request_id);
+
+        // 按时间顺序（从早到晚）对未保护的消息进行更激进的压缩
+        let mut remaining_tokens = current_tokens;
+        let target_reduction = remaining_tokens - max_tokens;
+        let mut reduced_tokens = 0usize;
+
         for idx in 0..n {
-            // 保护“最终答复”（最近一条 assistant）不被精简
-            if idx + 1 == n && messages[idx].role.eq_ignore_ascii_case("assistant") {
+            if protected[idx] || reduced_tokens >= target_reduction {
                 continue;
             }
-            // 跳过 system 消息的强制精简
-            if messages[idx].role.eq_ignore_ascii_case("system") {
-                continue;
-            }
-            output[idx].content = summarize_content(&output[idx].content, 4);
-            token_cache[idx] = estimate_tokens(&output[idx].content) + per_message_overhead;
-            current_tokens = token_cache.iter().sum();
-            if current_tokens <= max_tokens {
+
+            let original_tokens = token_cache[idx];
+            // 根据距离当前位置的远近决定压缩程度
+            let distance_factor = (n - idx) as f32 / n as f32;
+            let compression_ratio = 0.1 + 0.4 * distance_factor; // 10%-50% 保留率
+
+            let target_chars = std::cmp::max(
+                8,
+                (output[idx].content.len() as f32 * compression_ratio) as usize,
+            );
+
+            output[idx].content = summarize_content(&output[idx].content, target_chars);
+            let new_tokens = estimate_tokens(&output[idx].content) + per_message_overhead;
+
+            reduced_tokens += original_tokens.saturating_sub(new_tokens);
+            token_cache[idx] = new_tokens;
+            remaining_tokens =
+                remaining_tokens.saturating_sub(original_tokens.saturating_sub(new_tokens));
+
+            if remaining_tokens <= max_tokens {
                 break;
             }
         }
     }
 
-    // 最后如果仍然超限（极端情况），对所有消息进行强制截短
-    if current_tokens > max_tokens {
+    // 最终检查：如果还是超限，对所有非关键消息进行极限压缩
+    let final_tokens: usize = token_cache.iter().sum();
+    if final_tokens > max_tokens {
+        println!("[request_id:{}] 执行极限压缩", request_id);
+
         for idx in 0..n {
-            if idx + 1 == n && messages[idx].role.eq_ignore_ascii_case("assistant") {
+            // 保护最后一条消息和所有 system 消息
+            if idx == n - 1 || messages[idx].role.eq_ignore_ascii_case("system") {
                 continue;
             }
-            if messages[idx].role.eq_ignore_ascii_case("system") {
-                continue;
-            }
-            output[idx].content = summarize_content(&output[idx].content, 2);
+
+            // 极限压缩到 5-15 个字符
+            let min_chars = if messages[idx].role.eq_ignore_ascii_case("assistant") {
+                10
+            } else {
+                5
+            };
+            output[idx].content = summarize_content(&output[idx].content, min_chars);
             token_cache[idx] = estimate_tokens(&output[idx].content) + per_message_overhead;
+
+            let current_total: usize = token_cache.iter().sum();
+            if current_total <= max_tokens {
+                break;
+            }
         }
     }
 
+    let final_total_tokens = calculate_total_tokens(&output);
     println!(
-        "智能裁切完成，最终消息数量: {}, 最终token数: {}",
+        "[request_id:{}] 智能裁切完成 - 消息数: {}, 最终token: {}, 压缩率: {:.1}%",
+        request_id,
         output.len(),
-        calculate_total_tokens(&output)
+        final_total_tokens,
+        (1.0 - final_total_tokens as f32 / total_tokens as f32) * 100.0
     );
-    println!("[request_id:{}] trim_context_smart: final_output_len={}", request_id, output.len());
+
     output
 }

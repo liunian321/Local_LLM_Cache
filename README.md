@@ -6,16 +6,27 @@
 
 ### 核心特性
 - 自动缓存API响应，提升响应速度
-- 上下文裁切功能，管理聊天上下文长度，防止token超限
+- **实验性功能**：智能上下文裁切功能，管理聊天上下文长度，防止token超限
 - 支持多个上游API端点，根据权重进行请求分发
 - 双线程池设计，独立处理缓存命中和未命中
+- Protocol Buffers支持，高效的数据序列化
+- HTTP/2协议支持，优化网络传输性能
+- 智能内存缓存管理，支持LRU淘汰策略
+- 数据库批量写入优化，提升缓存存储效率
 
 ### 快速配置
 ```yaml
 # config.yaml
+server:
+  host: "127.0.0.1"
+  port: 4321
+
+# 实验性功能：上下文裁切
 context_trim:
-  enabled: true               # 启用上下文裁切
+  enabled: true               # 启用上下文裁切（实验性功能）
   max_context_tokens: 4096    # 设置最大token数
+  smart_enabled: false        # 启用智能裁切模式
+  summary_mode: "local"       # 摘要模式：local/api
 
 api_endpoints:
   - url: "http://127.0.0.1:1234"
@@ -27,21 +38,27 @@ api_endpoints:
 
 ## 功能描述
 
-1. 聊天请求处理：支持处理聊天请求，并将结果缓存到 SQLite 数据库中
-2. 模型获取：提供获取可用模型列表的接口
-3. 嵌入生成：支持生成文本嵌入，并返回嵌入结果
-4. 缓存管理：使用 SQLite 数据库缓存 API 响应，支持自动检查点和 WAL 模式
-5. 备选请求方式：支持使用 `curl` 作为备选请求方式
-6. 缓存版本控制：通过环境变量支持缓存版本控制和逐步更新
-7. 负载均衡：支持配置多个上游API端点并根据权重进行请求分发
-8. 代理支持：可配置使用系统代理访问API
-9. 缓存自动维护：支持自动清理过期缓存和维护性能
-10. 请求并发控制：支持设置最大并发请求数
-11. 统计和监控：提供缓存使用统计信息
-12. 双线程池系统：独立的缓存命中和缓存未命中线程池
-13. 思考模式支持：可配置是否启用模型的思考功能
-14. 上下文裁切功能：裁切聊天上下文，防止超出模型的最大token限制
-15. 空闲刷新机制：支持在空闲时批量刷新内存缓存到数据库
+1. **聊天请求处理**：支持处理聊天请求，并将结果缓存到 SQLite 数据库中
+2. **模型获取**：提供获取可用模型列表的接口
+3. **嵌入生成**：支持生成文本嵌入，并返回嵌入结果
+4. **缓存管理**：使用 SQLite 数据库缓存 API 响应，支持自动检查点和 WAL 模式
+5. **备选请求方式**：支持使用 `curl` 作为备选请求方式
+6. **缓存版本控制**：通过环境变量支持缓存版本控制和逐步更新
+7. **负载均衡**：支持配置多个上游API端点并根据权重进行请求分发
+8. **代理支持**：可配置使用系统代理访问API
+9. **缓存自动维护**：支持自动清理过期缓存和维护性能
+10. **请求并发控制**：支持设置最大并发请求数
+11. **统计和监控**：提供缓存使用统计信息
+12. **双线程池系统**：独立的缓存命中和缓存未命中线程池
+13. **思考模式支持**：可配置是否启用模型的思考功能
+14. **实验性功能 - 上下文裁切**：智能裁切聊天上下文，防止超出模型的最大token限制
+15. **空闲刷新机制**：支持在空闲时批量刷新内存缓存到数据库
+16. **Protocol Buffers支持**：使用 protobuf 进行高效的数据序列化和反序列化
+17. **HTTP/2协议支持**：客户端支持 HTTP/2 协议，优化网络传输性能
+18. **智能内存缓存**：支持 LRU 淘汰策略的内存缓存管理
+19. **数据库批量写入**：优化数据库写入性能，支持批量操作
+20. **服务器配置**：可配置服务器监听地址和端口
+21. **数据库优化**：支持索引优化、连接池管理和性能调优
 
 ## 如何使用
 
@@ -64,7 +81,20 @@ api_endpoints:
 项目使用 `config.yaml` 进行配置，包含以下主要设置：
 
 ```yaml
+# 服务器配置
+server:
+  host: "127.0.0.1"
+  port: 4321
+
+# 数据库配置
 database_url: "cache.db"
+database:
+  max_connections: 10
+  min_connections: 1
+  acquire_timeout_seconds: 30
+  idle_timeout_seconds: 600
+
+# 缓存配置
 cache_version: 0
 cache_override_mode: true
 use_curl: false
@@ -73,16 +103,19 @@ enable_thinking: false # 是否启用思考功能，可设置为true、false或n
 cache_hit_pool_size: 8
 cache_miss_pool_size: 8
 max_concurrent_requests: 100
-# 缓存配置
+
+# 内存缓存配置
 cache:
   enabled: true               # 是否启用缓存功能
   max_items: 100              # 内存缓存最大条目数量
   batch_write_size: 20        # 批量写入数据库的数量
+
 # 空闲刷新配置
 idle_flush:
   enabled: true               # 是否启用空闲刷新功能
   idle_timeout_seconds: 300   # 空闲超时时间（秒）
   check_interval_seconds: 10  # 检查间隔时间（秒）
+
 # 缓存清理配置
 cache_maintenance:
   enabled: true                # 是否启用缓存维护
@@ -90,14 +123,50 @@ cache_maintenance:
   retention_days: 30           # 保留天数
   cleanup_on_startup: true     # 启动时是否执行清理
   min_hit_count: 1             # 最小命中次数（低于此值的无引用答案会被清理）
-# 上下文裁切配置
+
+# 实验性功能：上下文裁切配置
 context_trim:
-  enabled: false               # 是否启用上下文裁切功能
+  enabled: false               # 是否启用上下文裁切功能（实验性功能）
   max_context_tokens: 4096     # 允许的最大上下文token数量，超过后会裁切
+  smart_enabled: false         # 启用智能裁切模式
+  smart_max_tokens: 4096       # 智能模式下的最大token数
+  per_message_overhead: 3      # 每条消息的固定开销
+  min_keep_pairs: 1            # 最少保留的对话对数量
+  summary_aggressiveness: 1    # 摘要激进程度
+  summary_mode: "local"        # 摘要模式：local/api
+  summary_api:                 # API摘要配置
+    enabled: false
+    endpoints: []
+    api_key_env: "SUMMARY_API_KEY"
+    max_tokens: 128
+    temperature: 0.2
+    timeout_seconds: 10
+
+# HTTP客户端配置
+http_client:
+  timeout_seconds: 30
+  connect_timeout_seconds: 10
+  tcp_keepalive_seconds: 60
+  pool_idle_timeout_seconds: 90
+  pool_max_idle_per_host: 20
+  max_redirects: 5
+  http2_keep_alive_interval_seconds: 20
+  http2_keep_alive_timeout_seconds: 20
+  http2_initial_stream_window_size: 1048576
+
+# 代理配置
+proxy:
+  request_timeout_seconds: 30
+  connect_timeout_seconds: 10
+  response_read_timeout_seconds: 30
+
+# API请求头配置
 api_headers:
   Content-Type: "application/json"
   Accept: "application/json"
   User-Agent: "llm_api_rust_client/1.0"
+
+# API端点配置
 api_endpoints:
   - url: "http://127.0.0.1:1234"
     weight: 10
@@ -173,7 +242,7 @@ api_endpoints:
    cargo run --release
    ```
    
-5. 服务默认在 `http://127.0.0.1:4321` 启动，可以在`server.rs`中修改端口。
+5. 服务默认在 `http://127.0.0.1:4321` 启动，可以通过配置文件修改监听地址和端口。
 
 ### API 接口
 
@@ -266,9 +335,16 @@ print(response.choices[0].message.content)
   - 当设置为 `false` 时：模型会直接回答，不进行额外思考过程。
   - 当设置为 `null` 或不设置时：不向上游API传递此参数，使用上游API的默认行为。
 
-- **context_trim**：上下文裁切功能配置。
-  - `enabled`：是否启用上下文裁切功能，默认为 `false`。
+- **context_trim**：实验性功能 - 上下文裁切功能配置。
+  - `enabled`：是否启用上下文裁切功能（实验性功能），默认为 `false`。
   - `max_context_tokens`：最大上下文token数量，建议设置为模型最大token数的70-80%，默认为 `4096`。
+  - `smart_enabled`：是否启用智能裁切模式，默认为 `false`。
+  - `smart_max_tokens`：智能模式下的最大token数，默认为 `4096`。
+  - `per_message_overhead`：每条消息的固定开销，默认为 `3`。
+  - `min_keep_pairs`：最少保留的对话对数量，默认为 `1`。
+  - `summary_aggressiveness`：摘要激进程度，默认为 `1`。
+  - `summary_mode`：摘要模式，可选 `local` 或 `api`，默认为 `local`。
+  - `summary_api`：API摘要配置，包含端点、API密钥环境变量等设置。
 
 - **idle_flush**：空闲刷新机制配置。
   - `enabled`：是否启用空闲刷新功能，默认为 `false`。
@@ -290,16 +366,27 @@ LLM API cache service built with Rust and Axum framework for handling chat reque
 
 ### Core Features
 - Automatically caches API responses to improve response speed
-- Context trimming functionality to manage chat context length and prevent token overflow
+- **Experimental Feature**: Smart context trimming functionality to manage chat context length and prevent token overflow
 - Supports multiple upstream API endpoints with weight-based request distribution
 - Dual thread pool design for independent cache hit and miss processing
+- Protocol Buffers support for efficient data serialization
+- HTTP/2 protocol support for optimized network transmission performance
+- Smart memory cache management with LRU eviction policy
+- Database batch write optimization for improved cache storage efficiency
 
 ### Quick Configuration
 ```yaml
 # config.yaml
+server:
+  host: "127.0.0.1"
+  port: 4321
+
+# Experimental Feature: Context Trimming
 context_trim:
-  enabled: true               # Enable context trimming
+  enabled: true               # Enable context trimming (experimental feature)
   max_context_tokens: 4096    # Maximum context token count, exceeding will be trimmed
+  smart_enabled: false        # Enable smart trimming mode
+  summary_mode: "local"       # Summary mode: local/api
 
 api_endpoints:
   - url: "http://127.0.0.1:1234"
@@ -311,22 +398,27 @@ Start service: `cargo run --release`
 
 ## Features
 
-1. Chat Request Handling: Processes chat requests and caches the results in a SQLite database
-2. Model Retrieval: Provides an interface to retrieve a list of available models
-3. Embedding Generation: Supports generating text embeddings and returns the embedding results
-4. Cache Management: Uses SQLite to cache API responses, supports automatic checkpoints and WAL mode
-5. Alternative Request Method: Supports using `curl` as an alternative request method
-6. Cache Version Control: Supports cache version control and gradual cache updates using environment variables
-7. Load Balancing: Supports configuring multiple upstream API endpoints and request distribution based on weight
-8. Proxy Support: Can configure using system proxy to access API
-9. Cache Auto Maintenance: Supports automatic cache cleanup and maintenance for optimal performance
-10. Request Concurrency Control: Supports setting maximum concurrent request count
-11. Statistics and Monitoring: Provides cache usage statistics
-12. Dual Thread Pool System: Separate cache hit and cache miss thread pools
-13. Thinking Mode Support: Can configure whether to enable thinking functionality for models
-14. Context Trimming Functionality: Trims chat context to prevent exceeding the model's maximum token limit
-15. Idle Flush Mechanism: Supports batch flushing memory cache to database during idle periods
-16. Protocol Buffers Support: Uses protobuf for data serialization and deserialization
+1. **Chat Request Handling**: Processes chat requests and caches the results in a SQLite database
+2. **Model Retrieval**: Provides an interface to retrieve a list of available models
+3. **Embedding Generation**: Supports generating text embeddings and returns the embedding results
+4. **Cache Management**: Uses SQLite to cache API responses, supports automatic checkpoints and WAL mode
+5. **Alternative Request Method**: Supports using `curl` as an alternative request method
+6. **Cache Version Control**: Supports cache version control and gradual cache updates using environment variables
+7. **Load Balancing**: Supports configuring multiple upstream API endpoints and request distribution based on weight
+8. **Proxy Support**: Can configure using system proxy to access API
+9. **Cache Auto Maintenance**: Supports automatic cache cleanup and maintenance for optimal performance
+10. **Request Concurrency Control**: Supports setting maximum concurrent request count
+11. **Statistics and Monitoring**: Provides cache usage statistics
+12. **Dual Thread Pool System**: Separate cache hit and cache miss thread pools
+13. **Thinking Mode Support**: Can configure whether to enable thinking functionality for models
+14. **Experimental Feature - Context Trimming**: Smart trimming of chat context to prevent exceeding the model's maximum token limit
+15. **Idle Flush Mechanism**: Supports batch flushing memory cache to database during idle periods
+16. **Protocol Buffers Support**: Uses protobuf for efficient data serialization and deserialization
+17. **HTTP/2 Protocol Support**: Client supports HTTP/2 protocol for optimized network transmission performance
+18. **Smart Memory Cache**: Memory cache management with LRU eviction policy
+19. **Database Batch Write**: Optimized database write performance with batch operations
+20. **Server Configuration**: Configurable server listening address and port
+21. **Database Optimization**: Supports index optimization, connection pool management, and performance tuning
 
 ## How to Use
 
@@ -556,9 +648,16 @@ The service supports automatic cache maintenance functionality, which can be imp
   - When set to `false`: The model will answer directly, without additional thinking process.
   - When set to `null` or not set: This parameter will not be passed to the upstream API, using the default behavior of the upstream API.
 
-- **context_trim**: Context trimming functionality configuration.
-  - `enabled`: Whether to enable context trimming functionality, defaults to `false`.
+- **context_trim**: Experimental Feature - Context trimming functionality configuration.
+  - `enabled`: Whether to enable context trimming functionality (experimental feature), defaults to `false`.
   - `max_context_tokens`: Maximum context token count, recommended to be 70-80% of the model's maximum token count, defaults to `4096`.
+  - `smart_enabled`: Whether to enable smart trimming mode, defaults to `false`.
+  - `smart_max_tokens`: Maximum token count in smart mode, defaults to `4096`.
+  - `per_message_overhead`: Fixed overhead per message, defaults to `3`.
+  - `min_keep_pairs`: Minimum number of conversation pairs to keep, defaults to `1`.
+  - `summary_aggressiveness`: Summary aggressiveness level, defaults to `1`.
+  - `summary_mode`: Summary mode, can be `local` or `api`, defaults to `local`.
+  - `summary_api`: API summary configuration, including endpoints, API key environment variables, etc.
 
 - **idle_flush**: Idle flush mechanism configuration.
   - `enabled`: Whether to enable idle flush functionality, defaults to `false`.
